@@ -204,7 +204,7 @@ func smokeModel(t *testing.T) string {
 	t.Helper()
 	model := os.Getenv("AGENTWRAP_OPENCODE_SMOKE_MODEL")
 	if model == "" {
-		model = "openai/gpt-5.5"
+		model = "opencode/deepseek-v4-flash-free"
 	}
 	if !strings.Contains(model, "/") {
 		t.Fatalf("AGENTWRAP_OPENCODE_SMOKE_MODEL must use provider/model format, got %q", model)
@@ -215,7 +215,7 @@ func smokeModel(t *testing.T) string {
 func smokeVariant() string {
 	variant := os.Getenv("AGENTWRAP_OPENCODE_SMOKE_VARIANT")
 	if variant == "" {
-		return "low"
+		return "opencode-zen"
 	}
 	return variant
 }
