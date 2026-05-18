@@ -1,6 +1,7 @@
-// Package agentwrap is the public SDK boundary for supervising agentic coding
-// runtimes.
+// Package agentwrap defines the public SDK contract for supervising agentic
+// coding runtimes.
 //
-// Sprint 1 intentionally exposes no runtime contract. Public runtime, session,
-// event, and error types are owned by the core contract sprint.
+// The contract is runtime-neutral: callers start runs, consume canonical
+// events, inspect metadata, and classify failures without depending on any
+// runtime's native process or event schema.
 package agentwrap
