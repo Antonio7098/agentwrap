@@ -106,11 +106,18 @@ func (r *Runtime) Capabilities(context.Context) (agentwrap.Capabilities, error) 
 			agentwrap.CapabilityArtifacts:        {Supported: true, Detail: "artifact references are projected when native events include them"},
 			agentwrap.CapabilityUsage:            {Supported: true, Detail: "usage is projected when native events include token data"},
 			agentwrap.CapabilityPermissions:      {Supported: true, Detail: "permission requests are surfaced and non-interactive OpenCode auto-rejects by default"},
-			agentwrap.CapabilitySessions:         {Supported: false, Detail: "retained-session operations are Sprint 4 scope"},
+			agentwrap.CapabilitySessions:         {Supported: false, Detail: "full retained-session lifecycle is not supported"},
+			agentwrap.CapabilitySessionContinue:  {Supported: true, Detail: "passes requested session id to opencode --session as best effort"},
+			agentwrap.CapabilitySessionFork:      {Supported: false, Detail: "forking retained sessions is not supported"},
+			agentwrap.CapabilitySessionReplace:   {Supported: false, Detail: "replacing retained sessions is not supported"},
+			agentwrap.CapabilitySessionRelease:   {Supported: false, Detail: "releasing retained sessions is not supported"},
 			agentwrap.CapabilityValidationEvents: {Supported: false, Detail: "output validation is Sprint 7 scope"},
 		},
 		Unsupported: []agentwrap.UnsupportedCapability{
-			{Capability: agentwrap.CapabilitySessions, Reason: "retained-session continue/reuse/fork/release is not implemented in Sprint 3"},
+			{Capability: agentwrap.CapabilitySessions, Reason: "full retained-session lifecycle is not supported"},
+			{Capability: agentwrap.CapabilitySessionFork, Reason: "OpenCode adapter does not support session fork"},
+			{Capability: agentwrap.CapabilitySessionReplace, Reason: "OpenCode adapter does not support session replace"},
+			{Capability: agentwrap.CapabilitySessionRelease, Reason: "OpenCode adapter does not support session release"},
 			{Capability: agentwrap.CapabilityValidationEvents, Reason: "validation and repair are owned by a later sprint"},
 		},
 	}, nil
@@ -124,7 +131,7 @@ type process interface {
 	Stdout() io.Reader
 	Stderr() io.Reader
 	Wait() processResult
-	Cancel(context.Context) error
+	Cancel(context.Context) cleanupResult
 }
 
 type processSpec struct {
@@ -137,4 +144,10 @@ type processSpec struct {
 type processResult struct {
 	ExitCode int
 	Err      error
+}
+
+type cleanupResult struct {
+	GracefulAttempted bool
+	ForceAttempted    bool
+	Err               error
 }

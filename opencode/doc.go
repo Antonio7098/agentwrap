@@ -6,4 +6,11 @@
 // shapes stay in this package; callers consume canonical agentwrap events,
 // final results, and classified SDK errors. Raw native payloads are preserved
 // for diagnostics and are marked unsafe by default.
+//
+// Cancellation and normal completion share one run-owned cleanup path. The
+// adapter attempts subprocess termination, waits for owned stream readers to
+// finish, and records cleanup failure separately from the primary run status.
+// Passing a SessionID maps to OpenCode's --session flag as best-effort
+// continuation; fork, replace, and release session actions are rejected before
+// process launch.
 package opencode

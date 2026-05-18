@@ -21,18 +21,19 @@ type Run interface {
 
 // RunRequest contains the minimal caller input needed by the runtime contract.
 type RunRequest struct {
-	Prompt      string
-	WorkDir     string
-	SessionID   SessionID
-	TurnID      TurnID
-	Provider    ProviderID
-	Model       ModelID
-	Permissions PermissionMode
-	Sandbox     SandboxMode
-	Timeout     time.Duration
-	Metadata    map[string]string
-	WantSession bool
-	RequireCaps []Capability
+	Prompt        string
+	WorkDir       string
+	SessionID     SessionID
+	TurnID        TurnID
+	Provider      ProviderID
+	Model         ModelID
+	Permissions   PermissionMode
+	Sandbox       SandboxMode
+	Timeout       time.Duration
+	Metadata      map[string]string
+	WantSession   bool
+	SessionAction SessionAction
+	RequireCaps   []Capability
 }
 
 // PermissionMode is an open placeholder for future permission policies.
@@ -73,6 +74,10 @@ type Capability string
 
 const (
 	CapabilitySessions         Capability = "sessions"
+	CapabilitySessionContinue  Capability = "session_continue"
+	CapabilitySessionFork      Capability = "session_fork"
+	CapabilitySessionReplace   Capability = "session_replace"
+	CapabilitySessionRelease   Capability = "session_release"
 	CapabilityCancellation     Capability = "cancellation"
 	CapabilityStructuredEvents Capability = "structured_events"
 	CapabilityRawPayloads      Capability = "raw_payloads"

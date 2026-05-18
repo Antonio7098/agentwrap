@@ -1,66 +1,18 @@
 {
   "events": [
-    {
-      "category": "usage",
-      "type": "usage.update",
-      "sequence": 1,
-      "session_id": "ses_1",
-      "raw_safe": false,
-      "raw_source": "opencode.stdout",
-      "payload_keys": [
-        "input_tokens",
-        "line",
-        "native_type",
-        "output_tokens",
-        "sessionID",
-        "total_tokens"
-      ]
-    },
-    {
-      "category": "artifact",
-      "type": "artifact.created",
-      "sequence": 2,
-      "session_id": "ses_1",
-      "raw_safe": false,
-      "raw_source": "opencode.stdout",
-      "payload_keys": [
-        "description",
-        "kind",
-        "line",
-        "native_type",
-        "sessionID",
-        "uri"
-      ]
-    },
-    {
-      "category": "final_result",
-      "type": "step_finish",
-      "sequence": 3,
-      "session_id": "ses_1",
-      "raw_safe": false,
-      "raw_source": "opencode.stdout",
-      "payload_keys": [
-        "line",
-        "native_type",
-        "part",
-        "sessionID"
-      ]
-    }
+    {"category":"lifecycle","type":"lifecycle.transition","sequence":1,"session_id":"","raw_safe":false,"raw_source":"","payload_keys":["from","reason","to"]},
+    {"category":"session","type":"session.relationship","sequence":2,"session_id":"","raw_safe":false,"raw_source":"","payload_keys":["best_effort","relationship","requested_action","requested_id","session_id","unsupported"]},
+    {"category":"usage","type":"usage.update","sequence":3,"session_id":"ses_1","raw_safe":false,"raw_source":"opencode.stdout","payload_keys":["input_tokens","line","native_type","output_tokens","sessionID","total_tokens"]},
+    {"category":"artifact","type":"artifact.created","sequence":4,"session_id":"ses_1","raw_safe":false,"raw_source":"opencode.stdout","payload_keys":["description","kind","line","native_type","sessionID","uri"]},
+    {"category":"final_result","type":"step_finish","sequence":5,"session_id":"ses_1","raw_safe":false,"raw_source":"opencode.stdout","payload_keys":["line","native_type","part","sessionID"]},
+    {"category":"lifecycle","type":"lifecycle.transition","sequence":6,"session_id":"","raw_safe":false,"raw_source":"","payload_keys":["from","reason","to"]}
   ],
   "result": {
     "status": "completed",
-    "event_count": 3,
+    "event_count": 6,
     "native_extension_count": 0,
-    "event_categories": {
-      "artifact": 1,
-      "final_result": 1,
-      "usage": 1
-    },
-    "native_event_types": {
-      "artifact.created": 1,
-      "step_finish": 1,
-      "usage.update": 1
-    },
+    "event_categories": {"artifact":1,"final_result":1,"lifecycle":2,"session":1,"usage":1},
+    "native_event_types": {"artifact.created":1,"lifecycle.transition":2,"session.relationship":1,"step_finish":1,"usage.update":1},
     "artifacts": 1,
     "warnings": 0,
     "has_error": false

@@ -1,62 +1,18 @@
 {
   "events": [
-    {
-      "category": "progress",
-      "type": "step_start",
-      "sequence": 1,
-      "session_id": "ses_1",
-      "raw_safe": false,
-      "raw_source": "opencode.stdout",
-      "payload_keys": [
-        "line",
-        "native_type",
-        "part",
-        "sessionID"
-      ]
-    },
-    {
-      "category": "message",
-      "type": "text",
-      "sequence": 2,
-      "session_id": "ses_1",
-      "raw_safe": false,
-      "raw_source": "opencode.stdout",
-      "payload_keys": [
-        "line",
-        "native_type",
-        "part",
-        "sessionID"
-      ]
-    },
-    {
-      "category": "final_result",
-      "type": "step_finish",
-      "sequence": 3,
-      "session_id": "ses_1",
-      "raw_safe": false,
-      "raw_source": "opencode.stdout",
-      "payload_keys": [
-        "line",
-        "native_type",
-        "part",
-        "sessionID"
-      ]
-    }
+    {"category":"lifecycle","type":"lifecycle.transition","sequence":1,"session_id":"","raw_safe":false,"raw_source":"","payload_keys":["from","reason","to"]},
+    {"category":"session","type":"session.relationship","sequence":2,"session_id":"","raw_safe":false,"raw_source":"","payload_keys":["best_effort","relationship","requested_action","requested_id","session_id","unsupported"]},
+    {"category":"progress","type":"step_start","sequence":3,"session_id":"ses_1","raw_safe":false,"raw_source":"opencode.stdout","payload_keys":["line","native_type","part","sessionID"]},
+    {"category":"message","type":"text","sequence":4,"session_id":"ses_1","raw_safe":false,"raw_source":"opencode.stdout","payload_keys":["line","native_type","part","sessionID"]},
+    {"category":"final_result","type":"step_finish","sequence":5,"session_id":"ses_1","raw_safe":false,"raw_source":"opencode.stdout","payload_keys":["line","native_type","part","sessionID"]},
+    {"category":"lifecycle","type":"lifecycle.transition","sequence":6,"session_id":"","raw_safe":false,"raw_source":"","payload_keys":["from","reason","to"]}
   ],
   "result": {
     "status": "completed",
-    "event_count": 3,
+    "event_count": 6,
     "native_extension_count": 0,
-    "event_categories": {
-      "final_result": 1,
-      "message": 1,
-      "progress": 1
-    },
-    "native_event_types": {
-      "step_finish": 1,
-      "step_start": 1,
-      "text": 1
-    },
+    "event_categories": {"final_result":1,"lifecycle":2,"message":1,"progress":1,"session":1},
+    "native_event_types": {"lifecycle.transition":2,"session.relationship":1,"step_finish":1,"step_start":1,"text":1},
     "artifacts": 0,
     "warnings": 0,
     "has_error": false

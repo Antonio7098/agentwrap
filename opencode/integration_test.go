@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,50 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 		}
 		if !strings.Contains(string(data), "agentwrap smoke ok") {
 			t.Fatalf("unexpected file content: %q", string(data))
+		}
+	})
+
+	t.Run("same session continuation", func(t *testing.T) {
+		token := fmt.Sprintf("agentwrap-session-token-%d", time.Now().UnixNano())
+		events1, result1, err := runRealSmoke(t, agentwrap.RunRequest{
+			Prompt:        fmt.Sprintf("Remember this exact token for the next turn: %s. Reply exactly: memory stored", token),
+			WorkDir:       ".",
+			Provider:      agentwrap.ProviderID(provider),
+			Model:         agentwrap.ModelID(modelID),
+			Timeout:       4 * time.Minute,
+			WantSession:   true,
+			SessionAction: agentwrap.SessionActionFresh,
+		}, append(baseOptions, WithExtraArgs("--dangerously-skip-permissions", "--variant", smokeVariant()))...)
+		if err != nil {
+			t.Fatalf("first wait: %v result=%#v", err, result1)
+		}
+		requireCompleted(t, result1)
+		if result1.SessionID == "" {
+			t.Fatalf("first run did not produce session id: %#v", result1)
+		}
+		requireSessionRelationship(t, result1, agentwrap.SessionRelationshipFresh)
+		requireEventCategory(t, events1, agentwrap.EventSession)
+
+		events2, result2, err := runRealSmoke(t, agentwrap.RunRequest{
+			Prompt:        "Reply with exactly the secret token from the previous turn and nothing else.",
+			WorkDir:       ".",
+			Provider:      agentwrap.ProviderID(provider),
+			Model:         agentwrap.ModelID(modelID),
+			Timeout:       4 * time.Minute,
+			SessionID:     result1.SessionID,
+			SessionAction: agentwrap.SessionActionContinue,
+		}, append(baseOptions, WithExtraArgs("--dangerously-skip-permissions", "--variant", smokeVariant()))...)
+		if err != nil {
+			t.Fatalf("second wait: %v result=%#v", err, result2)
+		}
+		requireCompleted(t, result2)
+		if result2.Metadata.Session.RequestedID != result1.SessionID {
+			t.Fatalf("requested session id = %q, want %q", result2.Metadata.Session.RequestedID, result1.SessionID)
+		}
+		requireSessionRelationship(t, result2, agentwrap.SessionRelationshipBestEffort)
+		requireEventCategory(t, events2, agentwrap.EventSession)
+		if !eventsContainText(events2, token) {
+			t.Fatalf("continuation token %q not observed in second-run events:\n%s", token, summarizeEvents(events2))
 		}
 	})
 
@@ -227,6 +272,22 @@ func requireSDKError(t *testing.T, err error, result agentwrap.RunResult, catego
 	if result.Err == nil || result.Err.Category != category {
 		t.Fatalf("result error = %#v, want %s", result.Err, category)
 	}
+}
+
+func requireSessionRelationship(t *testing.T, result agentwrap.RunResult, relationship agentwrap.SessionRelationship) {
+	t.Helper()
+	if result.Metadata.Session.Relationship != relationship {
+		t.Fatalf("session relationship = %q, want %q result=%#v", result.Metadata.Session.Relationship, relationship, result)
+	}
+}
+
+func eventsContainText(events []agentwrap.Event, want string) bool {
+	for _, event := range events {
+		if strings.Contains(textFromEvent(event), want) {
+			return true
+		}
+	}
+	return false
 }
 
 func summarizeEvents(events []agentwrap.Event) string {

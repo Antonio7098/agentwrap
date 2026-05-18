@@ -18,6 +18,9 @@ var runCounter atomic.Int64
 // StartRun launches OpenCode in JSON event mode and returns a streaming run
 // handle. The returned run owns the subprocess and event decoding state.
 func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agentwrap.Run, error) {
+	if err := validateSessionRequest(req); err != nil {
+		return nil, err
+	}
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if req.Timeout > 0 {
@@ -95,15 +98,19 @@ type run struct {
 	events chan agentwrap.Event
 	done   chan struct{}
 
-	mu       sync.Mutex
-	result   agentwrap.RunResult
-	waitErr  error
-	started  time.Time
-	finished time.Time
+	mu            sync.Mutex
+	result        agentwrap.RunResult
+	waitErr       error
+	cleanupOnce   sync.Once
+	cleanupResult agentwrap.CleanupMetadata
+	started       time.Time
+	finished      time.Time
 
 	context      agentwrap.RuntimeContext
+	eventMu      sync.Mutex
 	seq          int64
 	sawFinal     bool
+	sessionID    agentwrap.SessionID
 	artifacts    []agentwrap.ArtifactRef
 	warnings     []string
 	usage        agentwrap.Usage
@@ -130,8 +137,10 @@ func (r *run) Wait(ctx context.Context) (agentwrap.RunResult, error) {
 
 func (r *run) Cancel(ctx context.Context) error {
 	r.cancel()
-	if err := r.proc.Cancel(ctx); err != nil {
-		return agentwrap.NewError(agentwrap.ErrorCancellation, "opencode cancel", "OpenCode cancellation failed", err, agentwrap.WithDebugDetail(err.Error()))
+	r.emitLifecycle(agentwrap.StateRunning, agentwrap.StateCancelled, "caller_cancel")
+	cleanup := r.cleanup(ctx, "caller_cancel")
+	if cleanup.Error != nil {
+		return cleanup.Error
 	}
 	return nil
 }
@@ -143,7 +152,9 @@ func (r *run) captureStderr() {
 
 func (r *run) cancelOnContextDone() {
 	<-r.ctx.Done()
-	_ = r.proc.Cancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = r.cleanup(ctx, "context_done")
 }
 
 func (r *run) run() {
@@ -151,21 +162,28 @@ func (r *run) run() {
 	defer close(r.done)
 	defer r.cancel()
 
+	r.emitLifecycle(agentwrap.StateInitialized, agentwrap.StateRunning, "process_started")
+	r.emitSession()
 	decodeErr := scanNativeRecords(r.proc.Stdout(), func(record nativeRecord) error {
-		r.seq++
+		seq := r.nextSequence()
 		projected := projectNative(projectionInput{
 			runID:  r.id,
 			turnID: r.req.TurnID,
 			ctx:    r.context,
-			seq:    r.seq,
+			seq:    seq,
 			now:    r.now(),
 			record: record,
 		})
 		if projected.event.SessionID == "" {
 			projected.event.SessionID = r.req.SessionID
 		}
+		if projected.event.SessionID != "" {
+			r.sessionID = projected.event.SessionID
+		}
 		r.recordEventStats(projected.event)
-		r.events <- projected.event
+		if !r.sendEvent(projected.event) {
+			return r.ctx.Err()
+		}
 		if projected.final {
 			r.sawFinal = true
 		}
@@ -181,15 +199,18 @@ func (r *run) run() {
 	})
 	processResult := r.proc.Wait()
 	<-r.stderrDone
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cleanupCancel()
+	cleanup := r.cleanup(cleanupCtx, "run_finished")
 	r.finished = r.now()
-	result, err := r.finalResult(decodeErr, processResult)
+	result, err := r.finalResult(decodeErr, processResult, cleanup)
 	r.mu.Lock()
 	r.result = result
 	r.waitErr = err
 	r.mu.Unlock()
 }
 
-func (r *run) finalResult(decodeErr error, proc processResult) (agentwrap.RunResult, error) {
+func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap.CleanupMetadata) (agentwrap.RunResult, error) {
 	status := agentwrap.StateCompleted
 	var sdkErr *agentwrap.SDKError
 	if decodeErr != nil {
@@ -220,16 +241,11 @@ func (r *run) finalResult(decodeErr error, proc processResult) (agentwrap.RunRes
 		StartedAt:  r.started,
 		FinishedAt: r.finished,
 		Duration:   r.finished.Sub(r.started),
-		Session: agentwrap.SessionMetadata{
-			ID:       r.req.SessionID,
-			Retained: r.req.WantSession,
-			Unsupported: []agentwrap.UnsupportedCapability{
-				{Capability: agentwrap.CapabilitySessions, Reason: "full retained-session lifecycle is Sprint 4 scope"},
-			},
-		},
-		Artifacts: r.artifacts,
-		Warnings:  r.warnings,
-		Usage:     r.usage,
+		Session:    sessionMetadata(r.req, r.sessionID),
+		Cleanup:    cleanup,
+		Artifacts:  r.artifacts,
+		Warnings:   r.warnings,
+		Usage:      r.usage,
 		NativeMetadata: map[string]any{
 			"stderr":                 r.stderrBuffer.String(),
 			"exit_code":              proc.ExitCode,
@@ -242,9 +258,12 @@ func (r *run) finalResult(decodeErr error, proc processResult) (agentwrap.RunRes
 	if sdkErr != nil {
 		metadata.Errors = []agentwrap.SDKError{*sdkErr}
 	}
+	if cleanup.Error != nil {
+		metadata.Errors = append(metadata.Errors, *cleanup.Error)
+	}
 	result := agentwrap.RunResult{
 		RunID:      r.id,
-		SessionID:  r.req.SessionID,
+		SessionID:  firstSessionID(r.sessionID, r.req.SessionID),
 		TurnID:     r.req.TurnID,
 		Status:     status,
 		Metadata:   metadata,
@@ -258,10 +277,61 @@ func (r *run) finalResult(decodeErr error, proc processResult) (agentwrap.RunRes
 	if sdkErr != nil {
 		return result, sdkErr
 	}
+	if cleanup.Error != nil {
+		return result, nil
+	}
 	return result, nil
 }
 
+func (r *run) cleanup(ctx context.Context, reason string) agentwrap.CleanupMetadata {
+	r.cleanupOnce.Do(func() {
+		r.emitLifecycle(agentwrap.StateRunning, agentwrap.StateCleanedUp, reason)
+		procCleanup := r.proc.Cancel(ctx)
+		r.cleanupResult = agentwrap.CleanupMetadata{Attempted: true, Completed: procCleanup.Err == nil, Failed: procCleanup.Err != nil}
+		if procCleanup.Err != nil {
+			r.cleanupResult.Error = agentwrap.NewError(agentwrap.ErrorCleanup, "opencode cleanup", "OpenCode cleanup failed", procCleanup.Err, agentwrap.WithDebugDetail(procCleanup.Err.Error()))
+			r.emitLifecycle(agentwrap.StateRunning, agentwrap.StateFailed, "cleanup_failed")
+		}
+	})
+	return r.cleanupResult
+}
+
+func (r *run) emitLifecycle(from, to agentwrap.LifecycleState, reason string) {
+	seq := r.nextSequence()
+	event := agentwrap.LifecycleEvent(r.id, r.req.SessionID, r.req.TurnID, r.context, seq, r.now(), from, to, reason)
+	r.recordEventStats(event)
+	_ = r.sendEvent(event)
+}
+
+func (r *run) emitSession() {
+	seq := r.nextSequence()
+	event := agentwrap.SessionEvent(r.id, r.req.SessionID, r.req.TurnID, r.context, seq, r.now(), sessionMetadata(r.req, r.sessionID))
+	r.recordEventStats(event)
+	_ = r.sendEvent(event)
+}
+
+func (r *run) nextSequence() int64 {
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
+	r.seq++
+	return r.seq
+}
+
+func (r *run) sendEvent(event agentwrap.Event) bool {
+	defer func() {
+		_ = recover()
+	}()
+	select {
+	case <-r.ctx.Done():
+		return false
+	case r.events <- event:
+		return true
+	}
+}
+
 func (r *run) recordEventStats(event agentwrap.Event) {
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
 	if r.nativeTypes == nil {
 		r.nativeTypes = make(map[string]int)
 	}
@@ -313,4 +383,61 @@ func debugDetail(stderr string) string {
 		return ""
 	}
 	return stderr
+}
+
+func validateSessionRequest(req agentwrap.RunRequest) error {
+	switch req.SessionAction {
+	case agentwrap.SessionActionDefault, agentwrap.SessionActionFresh, agentwrap.SessionActionContinue:
+		return nil
+	case agentwrap.SessionActionFork:
+		return unsupportedSessionAction(agentwrap.CapabilitySessionFork, "OpenCode adapter does not support session fork")
+	case agentwrap.SessionActionReplace:
+		return unsupportedSessionAction(agentwrap.CapabilitySessionReplace, "OpenCode adapter does not support session replace")
+	case agentwrap.SessionActionRelease:
+		return unsupportedSessionAction(agentwrap.CapabilitySessionRelease, "OpenCode adapter does not support session release")
+	default:
+		return unsupportedSessionAction(agentwrap.CapabilitySessions, fmt.Sprintf("unsupported session action %q", req.SessionAction))
+	}
+}
+
+func unsupportedSessionAction(capability agentwrap.Capability, reason string) error {
+	return agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode session", reason, nil, agentwrap.WithDebugDetail(string(capability)))
+}
+
+func sessionMetadata(req agentwrap.RunRequest, observedID agentwrap.SessionID) agentwrap.SessionMetadata {
+	action := req.SessionAction
+	if action == agentwrap.SessionActionDefault {
+		switch {
+		case req.SessionID != "":
+			action = agentwrap.SessionActionContinue
+		case req.WantSession:
+			action = agentwrap.SessionActionFresh
+		}
+	}
+	metadata := agentwrap.SessionMetadata{
+		ID:              firstSessionID(observedID, req.SessionID),
+		RequestedID:     req.SessionID,
+		RequestedAction: action,
+		Retained:        req.WantSession || req.SessionID != "",
+	}
+	switch action {
+	case agentwrap.SessionActionFresh:
+		metadata.Relationship = agentwrap.SessionRelationshipFresh
+	case agentwrap.SessionActionContinue:
+		metadata.Relationship = agentwrap.SessionRelationshipBestEffort
+		metadata.Continued = req.SessionID != ""
+		metadata.BestEffort = true
+		metadata.UnsupportedReason = "OpenCode --session continuation is passed through but not verified as durable retention"
+	case agentwrap.SessionActionFork, agentwrap.SessionActionReplace, agentwrap.SessionActionRelease:
+		metadata.Relationship = agentwrap.SessionRelationshipUnsupported
+		metadata.UnsupportedReason = "retained-session action is unsupported by OpenCode adapter"
+		metadata.Unsupported = []agentwrap.UnsupportedCapability{{Capability: agentwrap.CapabilitySessions, Reason: metadata.UnsupportedReason}}
+	default:
+		if req.WantSession || req.SessionID != "" {
+			metadata.Relationship = agentwrap.SessionRelationshipBestEffort
+			metadata.BestEffort = true
+			metadata.UnsupportedReason = "full retained-session lifecycle is unsupported by OpenCode adapter"
+		}
+	}
+	return metadata
 }

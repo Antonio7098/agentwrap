@@ -17,26 +17,36 @@ import (
 )
 
 type fakeRunner struct {
-	proc process
-	err  error
-	spec processSpec
+	proc   process
+	procs  []process
+	err    error
+	spec   processSpec
+	starts int
 }
 
 func (r *fakeRunner) Start(_ context.Context, spec processSpec) (process, error) {
 	r.spec = spec
+	r.starts++
 	if r.err != nil {
 		return nil, r.err
+	}
+	if len(r.procs) > 0 {
+		next := r.procs[0]
+		r.procs = r.procs[1:]
+		return next, nil
 	}
 	return r.proc, nil
 }
 
 type fakeProcess struct {
-	stdout  string
-	stderr  string
-	result  processResult
-	cancel  error
-	blockCh chan struct{}
-	once    sync.Once
+	stdout      string
+	stderr      string
+	result      processResult
+	cancel      error
+	cancelCount int
+	blockCh     chan struct{}
+	once        sync.Once
+	mu          sync.Mutex
 }
 
 func (p *fakeProcess) Stdout() io.Reader {
@@ -47,13 +57,22 @@ func (p *fakeProcess) Stdout() io.Reader {
 }
 func (p *fakeProcess) Stderr() io.Reader   { return bytes.NewBufferString(p.stderr) }
 func (p *fakeProcess) Wait() processResult { return p.result }
-func (p *fakeProcess) Cancel(context.Context) error {
+func (p *fakeProcess) Cancel(context.Context) cleanupResult {
+	p.mu.Lock()
+	p.cancelCount++
+	p.mu.Unlock()
 	p.once.Do(func() {
 		if p.blockCh != nil {
 			close(p.blockCh)
 		}
 	})
-	return p.cancel
+	return cleanupResult{GracefulAttempted: true, Err: p.cancel}
+}
+
+func (p *fakeProcess) CancelCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cancelCount
 }
 
 type blockingReader struct{ done <-chan struct{} }
@@ -96,14 +115,14 @@ func TestRunSuccessEmitsCanonicalEventsAndResult(t *testing.T) {
 	if result.Err != nil || result.Status != agentwrap.StateCompleted {
 		t.Fatalf("result = %#v err=%v", result, result.Err)
 	}
-	if len(events) != 3 {
-		t.Fatalf("events = %d, want 3", len(events))
+	if len(events) != 6 {
+		t.Fatalf("events = %d, want 6", len(events))
 	}
-	if events[0].Category != agentwrap.EventProgress || events[1].Category != agentwrap.EventMessage || events[2].Category != agentwrap.EventFinalResult {
+	if events[0].Category != agentwrap.EventLifecycle || events[1].Category != agentwrap.EventSession || events[2].Category != agentwrap.EventProgress || events[3].Category != agentwrap.EventMessage || events[4].Category != agentwrap.EventFinalResult || events[5].Category != agentwrap.EventLifecycle {
 		t.Fatalf("unexpected categories: %#v", events)
 	}
-	if events[0].Raw == nil || events[0].Raw.Safe {
-		t.Fatalf("raw payload missing or safe: %#v", events[0].Raw)
+	if events[2].Raw == nil || events[2].Raw.Safe {
+		t.Fatalf("raw payload missing or safe: %#v", events[2].Raw)
 	}
 	if got := result.Metadata.NativeMetadata["stderr"]; got != "diagnostic" {
 		t.Fatalf("stderr metadata = %#v", got)
@@ -121,14 +140,14 @@ func TestRunUnknownEventDoesNotFail(t *testing.T) {
 	if result.Err != nil || result.Status != agentwrap.StateCompleted {
 		t.Fatalf("result = %#v err=%v", result, result.Err)
 	}
-	if events[0].Category != agentwrap.EventNativeExtension {
-		t.Fatalf("first category = %s", events[0].Category)
+	if events[2].Category != agentwrap.EventNativeExtension {
+		t.Fatalf("native category = %s", events[2].Category)
 	}
 	if got := result.Metadata.NativeMetadata["native_extension_count"]; got != 1 {
 		t.Fatalf("native_extension_count = %#v, want 1", got)
 	}
-	if got := result.Metadata.NativeMetadata["event_count"]; got != int64(2) {
-		t.Fatalf("event_count = %#v, want 2", got)
+	if got := result.Metadata.NativeMetadata["event_count"]; got != int64(5) {
+		t.Fatalf("event_count = %#v, want 5", got)
 	}
 }
 
@@ -143,7 +162,7 @@ func TestRunProjectsUsageAndArtifacts(t *testing.T) {
 	if result.Status != agentwrap.StateCompleted {
 		t.Fatalf("status = %s", result.Status)
 	}
-	if len(events) != 3 || events[0].Category != agentwrap.EventUsage || events[1].Category != agentwrap.EventArtifact || events[2].Category != agentwrap.EventFinalResult {
+	if len(events) != 6 || events[2].Category != agentwrap.EventUsage || events[3].Category != agentwrap.EventArtifact || events[4].Category != agentwrap.EventFinalResult {
 		t.Fatalf("unexpected events: %#v", events)
 	}
 	if result.Usage.TotalTokens == nil || *result.Usage.TotalTokens != 12 {
@@ -269,6 +288,67 @@ func TestContextTimeoutClassifiesRunAsTimeout(t *testing.T) {
 	_, result, err := drainRunErr(t, run)
 	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorTimeout {
 		t.Fatalf("err = %v result=%#v", err, result)
+	}
+}
+
+func TestCleanupFailureDoesNotOverwritePrimarySuccess(t *testing.T) {
+	proc := &fakeProcess{stdout: readFixture(t, "normal.ndjson"), cancel: errors.New("cleanup failed")}
+	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: proc}))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if result.Status != agentwrap.StateCompleted || result.Err != nil {
+		t.Fatalf("primary result changed: %#v", result)
+	}
+	if !result.Metadata.Cleanup.Failed || result.Metadata.Cleanup.Error == nil || result.Metadata.Cleanup.Error.Category != agentwrap.ErrorCleanup {
+		t.Fatalf("cleanup metadata = %#v", result.Metadata.Cleanup)
+	}
+}
+
+func TestUnsupportedSessionActionFailsBeforeStart(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello", SessionAction: agentwrap.SessionActionFork})
+	if err == nil {
+		t.Fatal("expected unsupported session action error")
+	}
+	var sdkErr *agentwrap.SDKError
+	if !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("err = %T %v", err, err)
+	}
+	if runner.starts != 0 {
+		t.Fatalf("process started for unsupported session action")
+	}
+}
+
+func TestCancelOneConcurrentRunDoesNotAffectAnother(t *testing.T) {
+	cancelled := &fakeProcess{blockCh: make(chan struct{})}
+	completes := &fakeProcess{stdout: readFixture(t, "normal.ndjson")}
+	runner := &fakeRunner{procs: []process{cancelled, completes}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run1, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run2, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run1.Cancel(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, result1, err1 := drainRunErr(t, run1)
+	_, result2 := drainRun(t, run2)
+	if err1 == nil || result1.Status != agentwrap.StateCancelled {
+		t.Fatalf("cancelled result = %#v err=%v", result1, err1)
+	}
+	if result2.Status != agentwrap.StateCompleted || result2.Err != nil {
+		t.Fatalf("second result = %#v", result2)
+	}
+	if cancelled.CancelCount() == 0 {
+		t.Fatalf("cancelled run was not cleaned up")
 	}
 }
 

@@ -23,6 +23,7 @@ type RunMetadata struct {
 	FinishedAt     time.Time
 	Duration       time.Duration
 	Session        SessionMetadata
+	Cleanup        CleanupMetadata
 	Artifacts      []ArtifactRef
 	Warnings       []string
 	Errors         []SDKError
@@ -32,14 +33,55 @@ type RunMetadata struct {
 	NativeMetadata map[string]any
 }
 
+// CleanupMetadata reports owned-resource cleanup separately from the primary
+// run outcome.
+type CleanupMetadata struct {
+	Attempted bool
+	Completed bool
+	Failed    bool
+	Error     *SDKError
+}
+
+// SessionAction identifies the retained-session behavior requested by a caller.
+type SessionAction string
+
+const (
+	SessionActionDefault  SessionAction = ""
+	SessionActionFresh    SessionAction = "fresh"
+	SessionActionContinue SessionAction = "continue"
+	SessionActionFork     SessionAction = "fork"
+	SessionActionReplace  SessionAction = "replace"
+	SessionActionRelease  SessionAction = "release"
+)
+
+// SessionRelationship identifies the runtime-resolved relationship between the
+// request and resulting session.
+type SessionRelationship string
+
+const (
+	SessionRelationshipNone        SessionRelationship = ""
+	SessionRelationshipFresh       SessionRelationship = "fresh"
+	SessionRelationshipSame        SessionRelationship = "same"
+	SessionRelationshipForked      SessionRelationship = "forked"
+	SessionRelationshipReplaced    SessionRelationship = "replaced"
+	SessionRelationshipReleased    SessionRelationship = "released"
+	SessionRelationshipUnsupported SessionRelationship = "unsupported"
+	SessionRelationshipBestEffort  SessionRelationship = "best_effort"
+)
+
 // SessionMetadata describes retained-session state when supported.
 type SessionMetadata struct {
-	ID          SessionID
-	Retained    bool
-	Continued   bool
-	ForkedFrom  SessionID
-	Replaced    SessionID
-	Unsupported []UnsupportedCapability
+	ID                SessionID
+	RequestedID       SessionID
+	RequestedAction   SessionAction
+	Relationship      SessionRelationship
+	Retained          bool
+	Continued         bool
+	ForkedFrom        SessionID
+	Replaced          SessionID
+	Unsupported       []UnsupportedCapability
+	UnsupportedReason string
+	BestEffort        bool
 }
 
 // ArtifactRef references durable runtime output without embedding large data.
