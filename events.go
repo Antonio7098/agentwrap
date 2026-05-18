@@ -4,17 +4,19 @@ import "time"
 
 // Event is the canonical event envelope emitted by runtimes.
 type Event struct {
-	ID        EventID
-	Sequence  int64
-	RunID     RunID
-	SessionID SessionID
-	TurnID    TurnID
-	Context   RuntimeContext
-	Time      time.Time
-	Category  EventCategory
-	Type      string
-	Payload   EventPayload
-	Raw       *RawPayload
+	ID            EventID
+	Sequence      int64
+	RunID         RunID
+	SessionID     SessionID
+	TurnID        TurnID
+	CorrelationID CorrelationID
+	CauseEventID  EventID
+	Context       RuntimeContext
+	Time          time.Time
+	Category      EventCategory
+	Type          string
+	Payload       EventPayload
+	Raw           *RawPayload
 }
 
 // EventPayload is intentionally open for future event types while core

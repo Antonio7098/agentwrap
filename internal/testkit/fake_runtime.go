@@ -184,6 +184,12 @@ func (r *fakeRun) play(ctx context.Context) {
 		event.RunID = r.id
 		event.SessionID = r.sessionID
 		event.TurnID = r.turnID
+		if event.CorrelationID == "" {
+			event.CorrelationID = agentwrap.CorrelationID(r.id)
+		}
+		if event.CauseEventID == "" && i > 0 {
+			event.CauseEventID = agentwrap.EventID(fmt.Sprintf("fake-event-%d", i))
+		}
 		event.Context = r.context
 		if event.Time.IsZero() {
 			event.Time = r.start.Add(time.Duration(i) * time.Millisecond)

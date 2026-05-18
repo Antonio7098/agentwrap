@@ -84,6 +84,12 @@ func TestFakeRuntimeContractNormalStream(t *testing.T) {
 		if event.RunID != run.ID() {
 			t.Fatalf("event RunID = %q, want %q", event.RunID, run.ID())
 		}
+		if event.CorrelationID == "" {
+			t.Fatalf("event %d CorrelationID is empty", i)
+		}
+		if i > 0 && event.CauseEventID == "" {
+			t.Fatalf("event %d CauseEventID is empty", i)
+		}
 	}
 }
 

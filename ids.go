@@ -12,6 +12,9 @@ type TurnID string
 // EventID identifies a canonical event within a run.
 type EventID string
 
+// CorrelationID links related events across runs, sessions, or attempts.
+type CorrelationID string
+
 // RuntimeKind identifies a runtime implementation. Values are intentionally
 // open so additional runtimes do not require SDK API changes.
 type RuntimeKind string
