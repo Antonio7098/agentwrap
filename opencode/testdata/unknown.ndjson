@@ -1,0 +1,2 @@
+{"type":"vendor.future.event","timestamp":1710000000000,"sessionID":"ses_1","payload":{"value":42}}
+{"type":"step_finish","timestamp":1710000002000,"sessionID":"ses_1","part":{"type":"step-finish","sessionID":"ses_1"}}

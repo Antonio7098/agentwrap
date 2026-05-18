@@ -1,0 +1,48 @@
+{
+  "events": [
+    {
+      "category": "native_extension",
+      "type": "vendor.future.event",
+      "sequence": 1,
+      "session_id": "ses_1",
+      "raw_safe": false,
+      "raw_source": "opencode.stdout",
+      "payload_keys": [
+        "line",
+        "native_type",
+        "payload",
+        "sessionID"
+      ]
+    },
+    {
+      "category": "final_result",
+      "type": "step_finish",
+      "sequence": 2,
+      "session_id": "ses_1",
+      "raw_safe": false,
+      "raw_source": "opencode.stdout",
+      "payload_keys": [
+        "line",
+        "native_type",
+        "part",
+        "sessionID"
+      ]
+    }
+  ],
+  "result": {
+    "status": "completed",
+    "event_count": 2,
+    "native_extension_count": 1,
+    "event_categories": {
+      "final_result": 1,
+      "native_extension": 1
+    },
+    "native_event_types": {
+      "step_finish": 1,
+      "vendor.future.event": 1
+    },
+    "artifacts": 0,
+    "warnings": 0,
+    "has_error": false
+  }
+}

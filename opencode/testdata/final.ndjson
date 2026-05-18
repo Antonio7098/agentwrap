@@ -1,0 +1,3 @@
+{"type":"usage.update","timestamp":1710000000000,"sessionID":"ses_1","input_tokens":5,"output_tokens":7,"total_tokens":12}
+{"type":"artifact.created","timestamp":1710000001000,"sessionID":"ses_1","uri":"file:///tmp/report.md","kind":"file","description":"report"}
+{"type":"step_finish","timestamp":1710000002000,"sessionID":"ses_1","part":{"type":"step-finish","sessionID":"ses_1"}}

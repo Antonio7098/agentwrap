@@ -1,0 +1,68 @@
+{
+  "events": [
+    {
+      "category": "usage",
+      "type": "usage.update",
+      "sequence": 1,
+      "session_id": "ses_1",
+      "raw_safe": false,
+      "raw_source": "opencode.stdout",
+      "payload_keys": [
+        "input_tokens",
+        "line",
+        "native_type",
+        "output_tokens",
+        "sessionID",
+        "total_tokens"
+      ]
+    },
+    {
+      "category": "artifact",
+      "type": "artifact.created",
+      "sequence": 2,
+      "session_id": "ses_1",
+      "raw_safe": false,
+      "raw_source": "opencode.stdout",
+      "payload_keys": [
+        "description",
+        "kind",
+        "line",
+        "native_type",
+        "sessionID",
+        "uri"
+      ]
+    },
+    {
+      "category": "final_result",
+      "type": "step_finish",
+      "sequence": 3,
+      "session_id": "ses_1",
+      "raw_safe": false,
+      "raw_source": "opencode.stdout",
+      "payload_keys": [
+        "line",
+        "native_type",
+        "part",
+        "sessionID"
+      ]
+    }
+  ],
+  "result": {
+    "status": "completed",
+    "event_count": 3,
+    "native_extension_count": 0,
+    "event_categories": {
+      "artifact": 1,
+      "final_result": 1,
+      "usage": 1
+    },
+    "native_event_types": {
+      "artifact.created": 1,
+      "step_finish": 1,
+      "usage.update": 1
+    },
+    "artifacts": 1,
+    "warnings": 0,
+    "has_error": false
+  }
+}
