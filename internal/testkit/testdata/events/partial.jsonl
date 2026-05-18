@@ -1,0 +1,2 @@
+{"type":"run.started","payload":{"run_id":"fake-run-partial"}}
+{"type":"message.delta","payload":{"role":"assistant","text":"unterminated"}

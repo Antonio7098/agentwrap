@@ -1,0 +1,2 @@
+{"type":"run.started","payload":{"run_id":"fake-run-failure"}}
+{"type":"run.failed","payload":{"reason":"fixture requested failure"}}
