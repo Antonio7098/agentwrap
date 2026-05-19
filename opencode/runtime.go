@@ -21,6 +21,9 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 	if err := validateSessionRequest(req); err != nil {
 		return nil, err
 	}
+	if err := r.requiredPreflight(ctx, req); err != nil {
+		return nil, err
+	}
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if req.Timeout > 0 {
@@ -61,6 +64,36 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 	go handle.cancelOnContextDone()
 	go handle.run()
 	return handle, nil
+}
+
+func (r *Runtime) requiredPreflight(ctx context.Context, req agentwrap.RunRequest) error {
+	if len(req.RequireHealth) == 0 {
+		return nil
+	}
+	report, err := r.CheckHealth(ctx, agentwrap.HealthCheckRequest{
+		Context: agentwrap.RuntimeContext{
+			RuntimeKind: agentwrap.RuntimeKind("opencode"),
+			RuntimeName: "opencode",
+			Provider:    req.Provider,
+			Model:       req.Model,
+		},
+		WorkDir:        req.WorkDir,
+		Provider:       req.Provider,
+		Model:          req.Model,
+		Permissions:    req.Permissions,
+		Sandbox:        req.Sandbox,
+		Timeout:        req.Timeout,
+		Metadata:       req.Metadata,
+		Checks:         req.RequireHealth,
+		RequiredChecks: req.RequireHealth,
+	})
+	if err != nil {
+		return err
+	}
+	if failure := agentwrap.RequiredHealthFailure(report, req.RequireHealth); failure != nil {
+		return failure
+	}
+	return nil
 }
 
 func (r *Runtime) processSpec(req agentwrap.RunRequest) processSpec {

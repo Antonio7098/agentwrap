@@ -215,6 +215,113 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 	})
 }
 
+func TestRealOpenCodeHealthSmoke(t *testing.T) {
+	if os.Getenv("AGENTWRAP_OPENCODE_HEALTH_SMOKE") != "1" {
+		t.Skip("set AGENTWRAP_OPENCODE_HEALTH_SMOKE=1 to run the real OpenCode health smoke test")
+	}
+
+	model := smokeModel(t)
+	provider, modelID := splitSmokeModel(model)
+	configPath := os.Getenv("AGENTWRAP_OPENCODE_SMOKE_CONFIG")
+	var options []Option
+	if configPath != "" {
+		options = append(options, WithEnv("OPENCODE_CONFIG="+configPath))
+	}
+	rt := NewRuntime(options...)
+
+	t.Run("health probes", func(t *testing.T) {
+		report, err := rt.CheckHealth(context.Background(), agentwrap.HealthCheckRequest{
+			Provider: agentwrap.ProviderID(provider),
+			Model:    agentwrap.ModelID(modelID),
+			WorkDir:  ".",
+			Timeout:  2 * time.Minute,
+			Checks: []agentwrap.HealthCheckID{
+				agentwrap.HealthCheckRuntimeAvailable,
+				agentwrap.HealthCheckStructuredOutput,
+				agentwrap.HealthCheckWorkDir,
+				agentwrap.HealthCheckConfig,
+				agentwrap.HealthCheckRuntimePaths,
+				agentwrap.HealthCheckProvider,
+				agentwrap.HealthCheckAuthentication,
+				agentwrap.HealthCheckModel,
+			},
+			RequiredChecks: []agentwrap.HealthCheckID{
+				agentwrap.HealthCheckRuntimeAvailable,
+				agentwrap.HealthCheckStructuredOutput,
+				agentwrap.HealthCheckWorkDir,
+				agentwrap.HealthCheckProvider,
+				agentwrap.HealthCheckModel,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireHealthResult(t, report, agentwrap.HealthCheckRuntimeAvailable)
+		requireHealthResult(t, report, agentwrap.HealthCheckStructuredOutput)
+		requireHealthResult(t, report, agentwrap.HealthCheckWorkDir)
+		requireHealthResult(t, report, agentwrap.HealthCheckConfig)
+		requireHealthResult(t, report, agentwrap.HealthCheckRuntimePaths)
+		requireHealthResult(t, report, agentwrap.HealthCheckProvider)
+		requireHealthResult(t, report, agentwrap.HealthCheckAuthentication)
+		requireHealthResult(t, report, agentwrap.HealthCheckModel)
+		if failure := agentwrap.RequiredHealthFailure(report, []agentwrap.HealthCheckID{
+			agentwrap.HealthCheckRuntimeAvailable,
+			agentwrap.HealthCheckStructuredOutput,
+			agentwrap.HealthCheckWorkDir,
+			agentwrap.HealthCheckProvider,
+			agentwrap.HealthCheckModel,
+		}); failure != nil {
+			t.Fatalf("required health failure: %v report=%#v", failure, report)
+		}
+		if report.EffectiveConfig.Provider.Value != agentwrap.ProviderID(provider) || report.EffectiveConfig.Model.Value != agentwrap.ModelID(modelID) {
+			t.Fatalf("effective provider/model = %#v/%#v, want %s/%s", report.EffectiveConfig.Provider, report.EffectiveConfig.Model, provider, modelID)
+		}
+		requireNoHealthSecretLeaks(t, report)
+	})
+
+	t.Run("required preflight allows run", func(t *testing.T) {
+		events, result, err := runRealSmoke(t, agentwrap.RunRequest{
+			Prompt:   "Reply with exactly: agentwrap health preflight ok",
+			WorkDir:  ".",
+			Provider: agentwrap.ProviderID(provider),
+			Model:    agentwrap.ModelID(modelID),
+			Timeout:  2 * time.Minute,
+			RequireHealth: []agentwrap.HealthCheckID{
+				agentwrap.HealthCheckRuntimeAvailable,
+				agentwrap.HealthCheckStructuredOutput,
+				agentwrap.HealthCheckWorkDir,
+				agentwrap.HealthCheckProvider,
+				agentwrap.HealthCheckModel,
+			},
+		}, append(options, WithExtraArgs("--dangerously-skip-permissions", "--variant", smokeVariant()))...)
+		if err != nil {
+			t.Fatalf("wait: %v result=%#v", err, result)
+		}
+		requireCompleted(t, result)
+		requireEventCategory(t, events, agentwrap.EventFinalResult)
+	})
+
+	t.Run("required preflight blocks invalid model", func(t *testing.T) {
+		runner := NewRuntime(options...)
+		_, err := runner.StartRun(context.Background(), agentwrap.RunRequest{
+			Prompt:   "Reply with one short sentence.",
+			WorkDir:  ".",
+			Provider: agentwrap.ProviderID(provider),
+			Model:    "agentwrap-missing-model",
+			Timeout:  2 * time.Minute,
+			RequireHealth: []agentwrap.HealthCheckID{
+				agentwrap.HealthCheckRuntimeAvailable,
+				agentwrap.HealthCheckStructuredOutput,
+				agentwrap.HealthCheckModel,
+			},
+		})
+		var sdkErr *agentwrap.SDKError
+		if err == nil || !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorModelUnavailable {
+			t.Fatalf("err = %#v, want model unavailable SDKError", err)
+		}
+	})
+}
+
 func runRealSmoke(t *testing.T, req agentwrap.RunRequest, options ...Option) ([]agentwrap.Event, agentwrap.RunResult, error) {
 	t.Helper()
 	run, err := startRealSmoke(t, req, options...)
@@ -227,6 +334,30 @@ func runRealSmoke(t *testing.T, req agentwrap.RunRequest, options ...Option) ([]
 	}
 	result, err := run.Wait(context.Background())
 	return events, result, err
+}
+
+func requireHealthResult(t *testing.T, report agentwrap.HealthReport, check agentwrap.HealthCheckID) agentwrap.HealthResult {
+	t.Helper()
+	for _, result := range report.Results {
+		if result.Check == check {
+			if result.Status == agentwrap.HealthUnsupported || result.Status == agentwrap.HealthUnrecoverable || result.Status == agentwrap.HealthTransientFail {
+				t.Fatalf("health %s = %s: %#v", check, result.Status, result)
+			}
+			return result
+		}
+	}
+	t.Fatalf("missing health result %s in %#v", check, report.Results)
+	return agentwrap.HealthResult{}
+}
+
+func requireNoHealthSecretLeaks(t *testing.T, report agentwrap.HealthReport) {
+	t.Helper()
+	text := fmt.Sprintf("%#v", report)
+	for _, value := range []string{"sk-", "Bearer ", "api_key=", "token=", "password="} {
+		if strings.Contains(text, value) {
+			t.Fatalf("health report may contain secret marker %q: %s", value, text)
+		}
+	}
 }
 
 func startRealSmoke(t *testing.T, req agentwrap.RunRequest, options ...Option) (agentwrap.Run, error) {
