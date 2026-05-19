@@ -20,7 +20,7 @@ type RunMetadata struct {
 	Attempt        int
 	Attempts       []AttemptSummary
 	Policy         PolicyMetadata
-	Status         LifecycleState
+	Status         RunStatus
 	StartedAt      time.Time
 	FinishedAt     time.Time
 	Duration       time.Duration
@@ -44,7 +44,7 @@ type AttemptSummary struct {
 	ParentRunID          RunID
 	Context              RuntimeContext
 	Request              AttemptRequest
-	Status               LifecycleState
+	Status               RunStatus
 	StartedAt            time.Time
 	FinishedAt           time.Time
 	Duration             time.Duration
@@ -99,11 +99,10 @@ type PolicyDecisionRecord struct {
 
 // PolicyDroppedEvent records policy event drops caused by slow consumers.
 type PolicyDroppedEvent struct {
-	CorrelationID CorrelationID
-	Category      EventCategory
-	Type          string
-	RunID         RunID
-	At            time.Time
+	Kind  EventKind
+	Type  string
+	RunID RunID
+	At    time.Time
 }
 
 // CleanupMetadata reports owned-resource cleanup separately from the primary

@@ -126,7 +126,7 @@ func ValidateEffectiveConfig(cfg EffectiveConfig) *SDKError {
 }
 
 func configValidationError(detail string) *SDKError {
-	return NewError(ErrorConfiguration, "config validation", detail, errors.New(detail), WithUserActionable(true), WithUnrecoverable(true))
+	return NewError(ErrorConfiguration, "config validation", detail, errors.New(detail))
 }
 
 // CallerConfigLayer converts a run request into highest-precedence config.

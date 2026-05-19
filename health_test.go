@@ -30,14 +30,14 @@ func TestRequiredHealthFailureOnlyBlocksRequiredChecks(t *testing.T) {
 		t.Fatalf("err = %#v, want health failure", err)
 	}
 	err = RequiredHealthFailure(report, []HealthCheckID{HealthCheckModel})
-	if err == nil || err.Category != ErrorHealth || !err.Unrecoverable {
+	if err == nil || err.Category != ErrorHealth {
 		t.Fatalf("err = %#v, want missing required health failure", err)
 	}
 }
 
-func TestErrorForHealthStatusClassifiesUnrecoverable(t *testing.T) {
+func TestErrorForHealthStatusRecordsFacts(t *testing.T) {
 	err := ErrorForHealthStatus(HealthCheckProvider, HealthUnrecoverable, ErrorProviderUnavailable, "missing provider", "provider=x", nil)
-	if err.Category != ErrorProviderUnavailable || !err.Unrecoverable || !err.UserActionable || err.Retryable {
-		t.Fatalf("bad classification: %#v", err)
+	if err.Category != ErrorProviderUnavailable || err.Metadata["health_status"] != string(HealthUnrecoverable) {
+		t.Fatalf("bad error facts: %#v", err)
 	}
 }

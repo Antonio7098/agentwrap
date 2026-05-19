@@ -31,7 +31,7 @@ func TestRealOpenCodeSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wait: %v result=%#v", err, result)
 	}
-	if result.Status != agentwrap.StateCompleted {
+	if result.Status != agentwrap.StatusCompleted {
 		t.Fatalf("status = %s", result.Status)
 	}
 }
@@ -61,9 +61,9 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 			t.Fatalf("wait: %v result=%#v", err, result)
 		}
 		requireCompleted(t, result)
-		requireEventCategory(t, events, agentwrap.EventProgress)
-		requireEventCategory(t, events, agentwrap.EventMessage)
-		requireEventCategory(t, events, agentwrap.EventFinalResult)
+		requireEventKind(t, events, agentwrap.EventProgress)
+		requireEventKind(t, events, agentwrap.EventMessage)
+		requireEventKind(t, events, agentwrap.EventFinalResult)
 		requireUnsafeRawPayloads(t, events)
 	})
 
@@ -81,7 +81,7 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 			t.Fatalf("wait: %v result=%#v", err, result)
 		}
 		requireCompleted(t, result)
-		requireEventCategory(t, events, agentwrap.EventFinalResult)
+		requireEventKind(t, events, agentwrap.EventFinalResult)
 		data, err := os.ReadFile(output)
 		if err != nil {
 			t.Fatalf("expected OpenCode to create %s: %v\nevents:\n%s", output, err, summarizeEvents(events))
@@ -110,7 +110,7 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 			t.Fatalf("first run did not produce session id: %#v", result1)
 		}
 		requireSessionRelationship(t, result1, agentwrap.SessionRelationshipFresh)
-		requireEventCategory(t, events1, agentwrap.EventSession)
+		requireEventKind(t, events1, agentwrap.EventSession)
 
 		events2, result2, err := runRealSmoke(t, agentwrap.RunRequest{
 			Prompt:        "Reply with exactly the secret token from the previous turn and nothing else.",
@@ -129,7 +129,7 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 			t.Fatalf("requested session id = %q, want %q", result2.Metadata.Session.RequestedID, result1.SessionID)
 		}
 		requireSessionRelationship(t, result2, agentwrap.SessionRelationshipBestEffort)
-		requireEventCategory(t, events2, agentwrap.EventSession)
+		requireEventKind(t, events2, agentwrap.EventSession)
 		if !eventsContainText(events2, token) {
 			t.Fatalf("continuation token %q not observed in second-run events:\n%s", token, summarizeEvents(events2))
 		}
@@ -144,7 +144,7 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 			Timeout:  1 * time.Minute,
 		}, append(baseOptions, WithExtraArgs("--dangerously-skip-permissions"))...)
 		requireSDKError(t, err, result, agentwrap.ErrorRuntimeExit)
-		if result.Status != agentwrap.StateFailed {
+		if result.Status != agentwrap.StatusFailed {
 			t.Fatalf("status = %s, want failed", result.Status)
 		}
 		if exitCode, _ := result.Metadata.NativeMetadata["exit_code"].(int); exitCode == 0 {
@@ -183,10 +183,10 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 		}
 		result, err := run.Wait(context.Background())
 		requireSDKError(t, err, result, agentwrap.ErrorCancellation)
-		if result.Status != agentwrap.StateCancelled {
+		if result.Status != agentwrap.StatusCancelled {
 			t.Fatalf("status = %s, want cancelled", result.Status)
 		}
-		requireEventCategory(t, events, agentwrap.EventLifecycle)
+		requireEventKind(t, events, agentwrap.EventLifecycle)
 		if !result.Metadata.Cleanup.Attempted || !result.Metadata.Cleanup.Completed {
 			t.Fatalf("cleanup metadata = %#v", result.Metadata.Cleanup)
 		}
@@ -211,7 +211,7 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 			t.Fatalf("wait: %v result=%#v", err, result)
 		}
 		requireCompleted(t, result)
-		requireEventCategory(t, events, agentwrap.EventFinalResult)
+		requireEventKind(t, events, agentwrap.EventFinalResult)
 	})
 }
 
@@ -298,7 +298,7 @@ func TestRealOpenCodeHealthSmoke(t *testing.T) {
 			t.Fatalf("wait: %v result=%#v", err, result)
 		}
 		requireCompleted(t, result)
-		requireEventCategory(t, events, agentwrap.EventFinalResult)
+		requireEventKind(t, events, agentwrap.EventFinalResult)
 	})
 
 	t.Run("required preflight blocks invalid model", func(t *testing.T) {
@@ -408,15 +408,15 @@ func splitSmokeModel(model string) (string, string) {
 
 func requireCompleted(t *testing.T, result agentwrap.RunResult) {
 	t.Helper()
-	if result.Err != nil || result.Status != agentwrap.StateCompleted {
+	if result.Err != nil || result.Status != agentwrap.StatusCompleted {
 		t.Fatalf("result = %#v err=%v", result, result.Err)
 	}
 }
 
-func requireEventCategory(t *testing.T, events []agentwrap.Event, category agentwrap.EventCategory) {
+func requireEventKind(t *testing.T, events []agentwrap.Event, category agentwrap.EventKind) {
 	t.Helper()
 	for _, event := range events {
-		if event.Category == category {
+		if event.Kind() == category {
 			return
 		}
 	}
@@ -474,7 +474,7 @@ func eventsContainText(events []agentwrap.Event, want string) bool {
 func summarizeEvents(events []agentwrap.Event) string {
 	var b strings.Builder
 	for _, event := range events {
-		b.WriteString(string(event.Category))
+		b.WriteString(string(event.Kind()))
 		b.WriteString(" ")
 		b.WriteString(event.Type)
 		if text := textFromEvent(event); text != "" {

@@ -57,9 +57,9 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 		now:          r.now,
 		stderrBuffer: newLimitBuffer(r.stderrLimit),
 		stderrDone:   make(chan struct{}),
-		lifecycle:    agentwrap.StateInitialized,
+		lifecycle:    agentwrap.StatusStarting,
 	}
-	handle.emitLifecycle(agentwrap.StateRunning, "process_started")
+	handle.emitLifecycle(agentwrap.StatusRunning, "process_started")
 	go handle.captureStderr()
 	go handle.cancelOnContextDone()
 	go handle.run()
@@ -138,7 +138,7 @@ type run struct {
 	waitErr       error
 	cleanupOnce   sync.Once
 	cleanupResult agentwrap.CleanupMetadata
-	lifecycle     agentwrap.LifecycleState
+	lifecycle     agentwrap.RunStatus
 	started       time.Time
 	finished      time.Time
 
@@ -173,7 +173,7 @@ func (r *run) Wait(ctx context.Context) (agentwrap.RunResult, error) {
 }
 
 func (r *run) Cancel(ctx context.Context) error {
-	r.emitLifecycle(agentwrap.StateCancelled, "caller_cancel")
+	r.emitLifecycle(agentwrap.StatusCancelled, "caller_cancel")
 	cleanup := r.cleanup(ctx, "caller_cancel")
 	r.cancel()
 	if cleanup.Error != nil {
@@ -245,6 +245,8 @@ func (r *run) run() {
 	cleanup := r.cleanup(cleanupCtx, "run_finished")
 	r.finished = r.now()
 	result, err := r.finalResult(decodeErr, processResult, cleanup)
+	r.emitLifecycle(result.Status, lifecycleReason(result.Status))
+	r.refreshResultEventStats(&result)
 	r.mu.Lock()
 	r.result = result
 	r.waitErr = err
@@ -252,15 +254,15 @@ func (r *run) run() {
 }
 
 func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap.CleanupMetadata) (agentwrap.RunResult, error) {
-	status := agentwrap.StateCompleted
+	status := agentwrap.StatusCompleted
 	var sdkErr *agentwrap.SDKError
 	if decodeErr != nil {
 		if errors.Is(decodeErr, context.Canceled) || errors.Is(decodeErr, context.DeadlineExceeded) {
 			sdkErr = classifyContextError(decodeErr, "opencode run")
 			if sdkErr.Category == agentwrap.ErrorCancellation {
-				status = agentwrap.StateCancelled
+				status = agentwrap.StatusCancelled
 			} else {
-				status = agentwrap.StateFailed
+				status = agentwrap.StatusFailed
 			}
 		} else {
 			var already *agentwrap.SDKError
@@ -269,21 +271,21 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 			} else {
 				sdkErr = classifyDecodeError(decodeErr)
 			}
-			status = agentwrap.StateFailed
+			status = agentwrap.StatusFailed
 		}
 	} else if err := r.ctx.Err(); err != nil {
 		sdkErr = classifyContextError(err, "opencode run")
 		if sdkErr.Category == agentwrap.ErrorCancellation {
-			status = agentwrap.StateCancelled
+			status = agentwrap.StatusCancelled
 		} else {
-			status = agentwrap.StateFailed
+			status = agentwrap.StatusFailed
 		}
 	} else if proc.Err != nil || proc.ExitCode != 0 {
 		sdkErr = classifyExitError(proc, r.stderrBuffer.String())
-		status = agentwrap.StateFailed
+		status = agentwrap.StatusFailed
 	} else if !r.sawFinal {
 		sdkErr = agentwrap.NewError(agentwrap.ErrorRuntimeExit, "opencode run", "OpenCode finished without a final structured result", nil, agentwrap.WithDebugDetail(debugDetail(r.stderrBuffer.String())))
-		status = agentwrap.StateFailed
+		status = agentwrap.StatusFailed
 	}
 	metadata := agentwrap.RunMetadata{
 		Context:    r.context,
@@ -317,6 +319,11 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	}
 	if cleanup.Error != nil {
 		metadata.Errors = append(metadata.Errors, *cleanup.Error)
+		if sdkErr == nil {
+			sdkErr = cleanup.Error
+			status = agentwrap.StatusFailed
+			metadata.Status = status
+		}
 	}
 	result := agentwrap.RunResult{
 		RunID:      r.id,
@@ -334,10 +341,17 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	if sdkErr != nil {
 		return result, sdkErr
 	}
-	if cleanup.Error != nil {
-		return result, nil
-	}
 	return result, nil
+}
+
+func (r *run) refreshResultEventStats(result *agentwrap.RunResult) {
+	if result.Metadata.NativeMetadata == nil {
+		result.Metadata.NativeMetadata = map[string]any{}
+	}
+	result.Metadata.NativeMetadata["event_count"] = r.seq
+	result.Metadata.NativeMetadata["event_categories"] = copyStringIntMap(r.categories)
+	result.Metadata.NativeMetadata["native_event_types"] = copyStringIntMap(r.nativeTypes)
+	result.Metadata.NativeMetadata["native_extension_count"] = r.categories[string(agentwrap.EventNativeExtension)]
 }
 
 func (r *run) cleanup(ctx context.Context, reason string) agentwrap.CleanupMetadata {
@@ -346,15 +360,27 @@ func (r *run) cleanup(ctx context.Context, reason string) agentwrap.CleanupMetad
 		r.cleanupResult = agentwrap.CleanupMetadata{Attempted: true, Completed: procCleanup.Err == nil, Failed: procCleanup.Err != nil}
 		if procCleanup.Err != nil {
 			r.cleanupResult.Error = agentwrap.NewError(agentwrap.ErrorCleanup, "opencode cleanup", "OpenCode cleanup failed", procCleanup.Err, agentwrap.WithDebugDetail(procCleanup.Err.Error()))
-			r.emitLifecycle(agentwrap.StateFailed, "cleanup_failed")
+			r.emitLifecycle(agentwrap.StatusFailed, "cleanup_failed")
 			return
 		}
-		r.emitLifecycle(agentwrap.StateCleanedUp, reason)
 	})
 	return r.cleanupResult
 }
 
-func (r *run) emitLifecycle(to agentwrap.LifecycleState, reason string) {
+func lifecycleReason(status agentwrap.RunStatus) string {
+	switch status {
+	case agentwrap.StatusCompleted:
+		return "run_finished"
+	case agentwrap.StatusCancelled:
+		return "run_cancelled"
+	case agentwrap.StatusFailed:
+		return "run_failed"
+	default:
+		return string(status)
+	}
+}
+
+func (r *run) emitLifecycle(to agentwrap.RunStatus, reason string) {
 	seq, from, ok := r.transitionLifecycle(to)
 	if !ok {
 		return
@@ -365,14 +391,11 @@ func (r *run) emitLifecycle(to agentwrap.LifecycleState, reason string) {
 	}
 }
 
-func (r *run) transitionLifecycle(to agentwrap.LifecycleState) (int64, agentwrap.LifecycleState, bool) {
+func (r *run) transitionLifecycle(to agentwrap.RunStatus) (int64, agentwrap.RunStatus, bool) {
 	r.eventMu.Lock()
 	defer r.eventMu.Unlock()
 	from := r.lifecycle
-	if from == to || from == agentwrap.StateCleanedUp || from == agentwrap.StateFailed {
-		return 0, from, false
-	}
-	if from == agentwrap.StateCancelled && to != agentwrap.StateCleanedUp && to != agentwrap.StateFailed {
+	if from == to || from.Terminal() {
 		return 0, from, false
 	}
 	r.seq++
@@ -380,7 +403,7 @@ func (r *run) transitionLifecycle(to agentwrap.LifecycleState) (int64, agentwrap
 	return r.seq, from, true
 }
 
-func (r *run) currentLifecycle() agentwrap.LifecycleState {
+func (r *run) currentLifecycle() agentwrap.RunStatus {
 	r.eventMu.Lock()
 	defer r.eventMu.Unlock()
 	return r.lifecycle
@@ -453,7 +476,7 @@ func (r *run) recordEventStats(event agentwrap.Event) {
 	if r.categories == nil {
 		r.categories = make(map[string]int)
 	}
-	r.categories[string(event.Category)]++
+	r.categories[string(event.Kind())]++
 	if event.Type != "" {
 		r.nativeTypes[event.Type]++
 	}

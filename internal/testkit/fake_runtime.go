@@ -95,7 +95,7 @@ type fakeRun struct {
 	done       chan struct{}
 	start      time.Time
 	finish     time.Time
-	status     agentwrap.LifecycleState
+	status     agentwrap.RunStatus
 	artifacts  []agentwrap.ArtifactRef
 	usage      agentwrap.Usage
 	mu         sync.Mutex
@@ -154,12 +154,11 @@ func (r *fakeRun) Cancel(context.Context) error {
 		r.mu.Unlock()
 		return nil
 	}
-	r.status = agentwrap.StateCancelled
+	r.status = agentwrap.StatusCancelled
 	r.err = &agentwrap.SDKError{
-		Category:       agentwrap.ErrorCancellation,
-		Operation:      "fake.Cancel",
-		SafeDetail:     "run cancelled",
-		UserActionable: true,
+		Category:   agentwrap.ErrorCancellation,
+		Operation:  "fake.Cancel",
+		UserDetail: "run cancelled",
 	}
 	r.mu.Unlock()
 	r.cancelOnce.Do(func() { close(r.cancel) })
@@ -180,17 +179,15 @@ func (r *fakeRun) play(ctx context.Context) {
 		default:
 		}
 		event.ID = agentwrap.EventID(fmt.Sprintf("fake-event-%d", i+1))
-		event.Sequence = int64(i + 1)
 		event.RunID = r.id
 		event.SessionID = r.sessionID
-		event.TurnID = r.turnID
-		if event.CorrelationID == "" {
-			event.CorrelationID = agentwrap.CorrelationID(r.id)
+		payload := make(agentwrap.EventPayload, len(event.Payload)+2)
+		for k, v := range event.Payload {
+			payload[k] = v
 		}
-		if event.CauseEventID == "" && i > 0 {
-			event.CauseEventID = agentwrap.EventID(fmt.Sprintf("fake-event-%d", i))
-		}
-		event.Context = r.context
+		event.Payload = payload
+		event.Payload["turn_id"] = string(r.turnID)
+		event.Payload["context"] = r.context
 		if event.Time.IsZero() {
 			event.Time = r.start.Add(time.Duration(i) * time.Millisecond)
 		}
@@ -207,7 +204,7 @@ func (r *fakeRun) play(ctx context.Context) {
 	}
 	r.mu.Lock()
 	if r.status == "" {
-		r.status = agentwrap.StateCompleted
+		r.status = agentwrap.StatusCompleted
 	}
 	r.finish = time.Now().UTC()
 	r.mu.Unlock()
@@ -216,34 +213,49 @@ func (r *fakeRun) play(ctx context.Context) {
 func (r *fakeRun) observe(event agentwrap.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if event.Category == agentwrap.EventLifecycle {
-		if state, ok := event.Payload["state"].(agentwrap.LifecycleState); ok {
+	if event.Kind() == agentwrap.EventLifecycle && !r.status.Terminal() && r.err == nil {
+		if state, ok := coerceRunStatus(event.Payload["state"]); ok {
 			r.status = state
 		}
-		if state, ok := event.Payload["state"].(string); ok {
-			r.status = agentwrap.LifecycleState(state)
-		}
 	}
-	if event.Category == agentwrap.EventArtifact {
+	if event.Kind() == agentwrap.EventArtifact {
 		if artifact, ok := event.Payload["artifact"].(agentwrap.ArtifactRef); ok {
 			r.artifacts = append(r.artifacts, artifact)
 		}
 	}
-	if event.Category == agentwrap.EventUsage {
+	if event.Kind() == agentwrap.EventUsage {
 		if usage, ok := event.Payload["usage"].(agentwrap.Usage); ok {
 			r.usage = usage
 		}
 	}
-	if event.Category == agentwrap.EventFatalError && r.err == nil {
-		r.status = agentwrap.StateFailed
+	if event.Kind() == agentwrap.EventFatalError && r.err == nil {
+		r.status = agentwrap.StatusFailed
 		r.err = agentwrap.NewError(agentwrap.ErrorRuntimeExit, "fake.play", "fake fatal event", nil)
+	}
+}
+
+func coerceRunStatus(value any) (agentwrap.RunStatus, bool) {
+	var status agentwrap.RunStatus
+	switch v := value.(type) {
+	case agentwrap.RunStatus:
+		status = v
+	case string:
+		status = agentwrap.RunStatus(v)
+	default:
+		return "", false
+	}
+	switch status {
+	case agentwrap.StatusStarting, agentwrap.StatusRunning, agentwrap.StatusCompleted, agentwrap.StatusFailed, agentwrap.StatusCancelled:
+		return status, true
+	default:
+		return "", false
 	}
 }
 
 func (r *fakeRun) markCancelled(cause error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.status = agentwrap.StateCancelled
+	r.status = agentwrap.StatusCancelled
 	r.finish = time.Now().UTC()
 	r.err = agentwrap.NewError(agentwrap.ErrorCancellation, "fake.play", "context cancelled", cause)
 }

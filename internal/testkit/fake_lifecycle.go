@@ -2,39 +2,39 @@ package testkit
 
 import "fmt"
 
-// LifecycleState is harness-local test vocabulary, not the Sprint 2 public
+// RunStatus is harness-local test vocabulary, not the Sprint 2 public
 // lifecycle contract.
-type LifecycleState string
+type RunStatus string
 
 const (
-	StateStarting  LifecycleState = "starting"
-	StateRunning   LifecycleState = "running"
-	StateCompleted LifecycleState = "completed"
-	StateFailed    LifecycleState = "failed"
+	StatusStarting  RunStatus = "starting"
+	StatusRunning   RunStatus = "running"
+	StatusCompleted RunStatus = "completed"
+	StatusFailed    RunStatus = "failed"
 )
 
 // RunFakeLifecycle derives a deterministic harness-local lifecycle from
 // structured fixture records.
-func RunFakeLifecycle(records []EventRecord) ([]LifecycleState, error) {
-	states := []LifecycleState{StateStarting}
+func RunFakeLifecycle(records []EventRecord) ([]RunStatus, error) {
+	states := []RunStatus{StatusStarting}
 	for _, record := range records {
 		if record.Err != nil {
-			states = append(states, StateFailed)
+			states = append(states, StatusFailed)
 			return states, record.Err
 		}
 		switch record.Type {
 		case "run.started":
-			states = append(states, StateRunning)
+			states = append(states, StatusRunning)
 		case "run.completed":
-			states = append(states, StateCompleted)
+			states = append(states, StatusCompleted)
 			return states, nil
 		case "run.failed":
-			states = append(states, StateFailed)
+			states = append(states, StatusFailed)
 			return states, fmt.Errorf("fake lifecycle failed at event %d", record.Position)
 		default:
 			continue
 		}
 	}
-	states = append(states, StateFailed)
+	states = append(states, StatusFailed)
 	return states, fmt.Errorf("fake lifecycle ended without completion")
 }

@@ -79,7 +79,7 @@ func TestProjectNativeEvents(t *testing.T) {
 	tests := []struct {
 		name         string
 		line         string
-		wantCategory agentwrap.EventCategory
+		wantCategory agentwrap.EventKind
 		wantFinal    bool
 	}{
 		{name: "progress", line: `{"type":"step_start","sessionID":"ses_1"}`, wantCategory: agentwrap.EventProgress},
@@ -107,8 +107,8 @@ func TestProjectNativeEvents(t *testing.T) {
 				seq:    int64(i + 1),
 				record: record,
 			})
-			if projected.event.Category != tt.wantCategory {
-				t.Fatalf("category = %s, want %s", projected.event.Category, tt.wantCategory)
+			if projected.event.Kind() != tt.wantCategory {
+				t.Fatalf("category = %s, want %s", projected.event.Kind(), tt.wantCategory)
 			}
 			if projected.final != tt.wantFinal {
 				t.Fatalf("final = %v, want %v", projected.final, tt.wantFinal)
@@ -117,6 +117,32 @@ func TestProjectNativeEvents(t *testing.T) {
 				t.Fatalf("raw payload should exist and be unsafe: %#v", projected.event.Raw)
 			}
 		})
+	}
+}
+
+func TestProjectNativePreservesSDKPayloadMetadata(t *testing.T) {
+	record, err := decodeNativeLine([]byte(`{"type":"text","native_type":"bad","line":999,"turn_id":"bad","context":"bad"}`), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected := projectNative(projectionInput{
+		runID:  "run_1",
+		turnID: "turn_1",
+		ctx:    agentwrap.RuntimeContext{RuntimeKind: "opencode"},
+		seq:    1,
+		record: record,
+	})
+	if projected.event.Payload["native_type"] != "text" {
+		t.Fatalf("native_type = %#v", projected.event.Payload["native_type"])
+	}
+	if projected.event.Payload["line"] != int64(1) {
+		t.Fatalf("line = %#v", projected.event.Payload["line"])
+	}
+	if projected.event.Payload["turn_id"] != "turn_1" {
+		t.Fatalf("turn_id = %#v", projected.event.Payload["turn_id"])
+	}
+	if projected.event.Payload["context"] != (agentwrap.RuntimeContext{RuntimeKind: "opencode"}) {
+		t.Fatalf("context = %#v", projected.event.Payload["context"])
 	}
 }
 

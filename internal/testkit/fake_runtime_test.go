@@ -13,30 +13,27 @@ func TestFakeRuntimeContractNormalStream(t *testing.T) {
 		Provider: "fake-provider",
 		Model:    "fake-model",
 		Script: []agentwrap.Event{
-			lifecycleEvent(agentwrap.StateStarting),
-			lifecycleEvent(agentwrap.StateRunning),
+			lifecycleEvent(agentwrap.StatusStarting),
+			lifecycleEvent(agentwrap.StatusRunning),
 			{
-				Category: agentwrap.EventMessage,
-				Type:     "message.delta",
-				Payload:  agentwrap.EventPayload{"text": "working"},
-				Raw:      &agentwrap.RawPayload{Source: "fake", Encoding: "json", Data: []byte(`{"native":true}`), Safe: true},
+				Type:    "message.delta",
+				Payload: agentwrap.EventPayloadWithKind(agentwrap.EventMessage, agentwrap.EventPayload{"text": "working"}),
+				Raw:     &agentwrap.RawPayload{Source: "fake", Encoding: "json", Data: []byte(`{"native":true}`), Safe: true},
 			},
 			{
-				Category: agentwrap.EventArtifact,
-				Type:     "artifact.created",
-				Payload: agentwrap.EventPayload{"artifact": agentwrap.ArtifactRef{
+				Type: "artifact.created",
+				Payload: agentwrap.EventPayloadWithKind(agentwrap.EventArtifact, agentwrap.EventPayload{"artifact": agentwrap.ArtifactRef{
 					ID:   "artifact-1",
 					URI:  "file:///tmp/report.md",
 					Kind: "markdown",
-				}},
+				}}),
 			},
 			{
-				Category: agentwrap.EventUsage,
-				Type:     "usage.update",
-				Payload:  agentwrap.EventPayload{"usage": agentwrap.Usage{TotalTokens: int64Ptr(42)}},
+				Type:    "usage.update",
+				Payload: agentwrap.EventPayloadWithKind(agentwrap.EventUsage, agentwrap.EventPayload{"usage": agentwrap.Usage{TotalTokens: int64Ptr(42)}}),
 			},
-			lifecycleEvent(agentwrap.StateCompleted),
-			{Category: agentwrap.EventFinalResult, Type: "run.final", Payload: agentwrap.EventPayload{"status": string(agentwrap.StateCompleted)}},
+			lifecycleEvent(agentwrap.StatusCompleted),
+			{Type: "run.final", Payload: agentwrap.EventPayloadWithKind(agentwrap.EventFinalResult, agentwrap.EventPayload{"status": string(agentwrap.StatusCompleted)})},
 		},
 	}
 	var _ agentwrap.Runtime = runtime
@@ -59,8 +56,8 @@ func TestFakeRuntimeContractNormalStream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.Status != agentwrap.StateCompleted {
-		t.Fatalf("Status = %q, want %q", result.Status, agentwrap.StateCompleted)
+	if result.Status != agentwrap.StatusCompleted {
+		t.Fatalf("Status = %q, want %q", result.Status, agentwrap.StatusCompleted)
 	}
 	if result.SessionID == "" {
 		t.Fatal("SessionID is empty")
@@ -77,18 +74,9 @@ func TestFakeRuntimeContractNormalStream(t *testing.T) {
 	if events[2].Raw == nil || string(events[2].Raw.Data) != `{"native":true}` {
 		t.Fatalf("raw payload = %#v", events[2].Raw)
 	}
-	for i, event := range events {
-		if event.Sequence != int64(i+1) {
-			t.Fatalf("event %d sequence = %d", i, event.Sequence)
-		}
+	for _, event := range events {
 		if event.RunID != run.ID() {
 			t.Fatalf("event RunID = %q, want %q", event.RunID, run.ID())
-		}
-		if event.CorrelationID == "" {
-			t.Fatalf("event %d CorrelationID is empty", i)
-		}
-		if i > 0 && event.CauseEventID == "" {
-			t.Fatalf("event %d CauseEventID is empty", i)
 		}
 	}
 }
@@ -127,10 +115,10 @@ func TestFakeRuntimeMalformedUnknownFailureAndCancellation(t *testing.T) {
 	t.Run("malformed event classification", func(t *testing.T) {
 		runtime := &FakeRuntime{
 			Script: []agentwrap.Event{
-				lifecycleEvent(agentwrap.StateRunning),
-				{Category: agentwrap.EventRecoverableError, Type: "event.malformed", Payload: agentwrap.EventPayload{"category": string(agentwrap.ErrorMalformedEvent)}},
-				{Category: agentwrap.EventUnknown, Type: "runtime.future_event", Raw: &agentwrap.RawPayload{Source: "fake", Data: []byte(`{"future":true}`)}},
-				lifecycleEvent(agentwrap.StateCompleted),
+				lifecycleEvent(agentwrap.StatusRunning),
+				{Type: "event.malformed", Payload: agentwrap.EventPayloadWithKind(agentwrap.EventWarning, agentwrap.EventPayload{"category": string(agentwrap.ErrorMalformedEvent)})},
+				{Type: "runtime.future_event", Payload: agentwrap.EventPayloadWithKind(agentwrap.EventNativeExtension, nil), Raw: &agentwrap.RawPayload{Source: "fake", Data: []byte(`{"future":true}`)}},
+				lifecycleEvent(agentwrap.StatusCompleted),
 			},
 		}
 		run, err := runtime.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "malformed"})
@@ -140,10 +128,10 @@ func TestFakeRuntimeMalformedUnknownFailureAndCancellation(t *testing.T) {
 		var sawMalformed bool
 		var sawUnknown bool
 		for event := range run.Events() {
-			if event.Category == agentwrap.EventRecoverableError {
+			if event.Kind() == agentwrap.EventWarning {
 				sawMalformed = true
 			}
-			if event.Category == agentwrap.EventUnknown && event.Raw != nil {
+			if event.Kind() == agentwrap.EventNativeExtension && event.Raw != nil {
 				sawUnknown = true
 			}
 		}
@@ -151,15 +139,15 @@ func TestFakeRuntimeMalformedUnknownFailureAndCancellation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Status != agentwrap.StateCompleted || !sawMalformed || !sawUnknown {
+		if result.Status != agentwrap.StatusCompleted || !sawMalformed || !sawUnknown {
 			t.Fatalf("status=%q malformed=%v unknown=%v", result.Status, sawMalformed, sawUnknown)
 		}
 	})
 
 	t.Run("fatal event classification", func(t *testing.T) {
 		runtime := &FakeRuntime{Script: []agentwrap.Event{
-			lifecycleEvent(agentwrap.StateRunning),
-			{Category: agentwrap.EventFatalError, Type: "run.failed"},
+			lifecycleEvent(agentwrap.StatusRunning),
+			{Type: "run.failed", Payload: agentwrap.EventPayloadWithKind(agentwrap.EventFatalError, nil)},
 		}}
 		run, err := runtime.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "fail"})
 		if err != nil {
@@ -171,8 +159,8 @@ func TestFakeRuntimeMalformedUnknownFailureAndCancellation(t *testing.T) {
 		if err == nil {
 			t.Fatal("Wait returned nil error")
 		}
-		if result.Status != agentwrap.StateFailed {
-			t.Fatalf("Status = %q, want %q", result.Status, agentwrap.StateFailed)
+		if result.Status != agentwrap.StatusFailed {
+			t.Fatalf("Status = %q, want %q", result.Status, agentwrap.StatusFailed)
 		}
 		var sdkErr *agentwrap.SDKError
 		if !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorRuntimeExit {
@@ -180,17 +168,38 @@ func TestFakeRuntimeMalformedUnknownFailureAndCancellation(t *testing.T) {
 		}
 	})
 
+	t.Run("fatal event remains sticky after completed lifecycle", func(t *testing.T) {
+		runtime := &FakeRuntime{Script: []agentwrap.Event{
+			lifecycleEvent(agentwrap.StatusRunning),
+			{Type: "run.failed", Payload: agentwrap.EventPayloadWithKind(agentwrap.EventFatalError, nil)},
+			lifecycleEvent(agentwrap.StatusCompleted),
+		}}
+		run, err := runtime.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "fail then complete"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range run.Events() {
+		}
+		result, err := run.Wait(context.Background())
+		if err == nil {
+			t.Fatal("Wait returned nil error")
+		}
+		if result.Status != agentwrap.StatusFailed {
+			t.Fatalf("Status = %q, want %q", result.Status, agentwrap.StatusFailed)
+		}
+	})
+
 	t.Run("cancellation state", func(t *testing.T) {
 		runtime := &FakeRuntime{Script: []agentwrap.Event{
-			lifecycleEvent(agentwrap.StateRunning),
-			lifecycleEvent(agentwrap.StateWaiting),
+			lifecycleEvent(agentwrap.StatusRunning),
+			lifecycleEvent(agentwrap.StatusRunning),
 		}}
 		run, err := runtime.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "cancel"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if event := <-run.Events(); event.Category != agentwrap.EventLifecycle {
-			t.Fatalf("first event category = %q", event.Category)
+		if event := <-run.Events(); event.Kind() != agentwrap.EventLifecycle {
+			t.Fatalf("first event category = %q", event.Kind())
 		}
 		if err := run.Cancel(context.Background()); err != nil {
 			t.Fatal(err)
@@ -201,17 +210,16 @@ func TestFakeRuntimeMalformedUnknownFailureAndCancellation(t *testing.T) {
 		if err == nil {
 			t.Fatal("Wait returned nil error")
 		}
-		if result.Status != agentwrap.StateCancelled {
-			t.Fatalf("Status = %q, want %q", result.Status, agentwrap.StateCancelled)
+		if result.Status != agentwrap.StatusCancelled {
+			t.Fatalf("Status = %q, want %q", result.Status, agentwrap.StatusCancelled)
 		}
 	})
 }
 
-func lifecycleEvent(state agentwrap.LifecycleState) agentwrap.Event {
+func lifecycleEvent(state agentwrap.RunStatus) agentwrap.Event {
 	return agentwrap.Event{
-		Category: agentwrap.EventLifecycle,
-		Type:     "lifecycle." + string(state),
-		Payload:  agentwrap.EventPayload{"state": state},
+		Type:    "lifecycle." + string(state),
+		Payload: agentwrap.EventPayloadWithKind(agentwrap.EventLifecycle, agentwrap.EventPayload{"state": state}),
 	}
 }
 

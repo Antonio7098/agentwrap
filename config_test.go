@@ -32,7 +32,7 @@ func TestValidateEffectiveConfigRejectsInvalidTimeout(t *testing.T) {
 	timeout := -time.Second
 	cfg := MergeEffectiveConfig("fake", ConfigLayer{Source: ConfigSourceCallerRequest, Timeout: &timeout})
 	err := ValidateEffectiveConfig(cfg)
-	if err == nil || err.Category != ErrorConfiguration || !err.Unrecoverable {
-		t.Fatalf("err = %#v, want configuration unrecoverable", err)
+	if err == nil || err.Category != ErrorConfiguration {
+		t.Fatalf("err = %#v, want configuration error", err)
 	}
 }

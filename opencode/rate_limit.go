@@ -64,7 +64,7 @@ func classifyRateLimitDetails(op, message, body string, headers, metadata map[st
 		}
 		info := rateLimitInfoFrom(headers, metadata, runtimeCtx, body, message, "http_429")
 		return &rateLimitClassification{
-			err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(body, message), nil, agentwrap.WithDebugDetail(debugRateLimitDetail(status, headers, body, message)), agentwrap.WithFallbackable(true), agentwrap.WithRetryable(true)),
+			err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(body, message), nil, rateLimitErrorOptions(status, headers, body, metadata, runtimeCtx, info)...),
 			info: info,
 		}
 	}
@@ -72,18 +72,33 @@ func classifyRateLimitDetails(op, message, body string, headers, metadata map[st
 		containsAny(normalizedMessage, "rate limit", "too many requests", "rate increased too quickly", "provider is overloaded", "resource_exhausted", "too_many_requests") {
 		info := rateLimitInfoFrom(headers, metadata, runtimeCtx, body, message, "message_or_body")
 		return &rateLimitClassification{
-			err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(body, message), nil, agentwrap.WithDebugDetail(debugRateLimitDetail(status, headers, body, message)), agentwrap.WithFallbackable(true), agentwrap.WithRetryable(true)),
+			err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(body, message), nil, rateLimitErrorOptions(status, headers, body, metadata, runtimeCtx, info)...),
 			info: info,
 		}
 	}
 	if status == 503 || status == 504 || status == 529 {
 		info := rateLimitInfoFrom(headers, metadata, runtimeCtx, body, message, "retryable_status")
 		return &rateLimitClassification{
-			err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, "OpenCode provider is temporarily rate limited or overloaded", nil, agentwrap.WithDebugDetail(debugRateLimitDetail(status, headers, body, message)), agentwrap.WithFallbackable(true), agentwrap.WithRetryable(true)),
+			err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, "OpenCode provider is temporarily rate limited or overloaded", nil, rateLimitErrorOptions(status, headers, body, metadata, runtimeCtx, info)...),
 			info: info,
 		}
 	}
 	return nil
+}
+
+func rateLimitErrorOptions(status int, headers map[string]string, body string, metadata map[string]string, runtimeCtx agentwrap.RuntimeContext, info *agentwrap.RateLimitInfo) []agentwrap.ErrorOption {
+	opts := []agentwrap.ErrorOption{
+		agentwrap.WithDebugDetail(debugRateLimitDetail(status, headers, body, "")),
+		agentwrap.WithStatusCode(status),
+		agentwrap.WithResponse(headers, body),
+		agentwrap.WithMetadata(metadata),
+		agentwrap.WithProviderModel(runtimeCtx.Provider, runtimeCtx.Model),
+		agentwrap.WithRuntimeKind(runtimeCtx.RuntimeKind),
+	}
+	if info != nil && info.RetryAfter > 0 {
+		opts = append(opts, agentwrap.WithRetryAfter(info.RetryAfter))
+	}
+	return opts
 }
 
 func parseStructuredRateLimitText(text string) (status int, body, message string, headers, metadata map[string]string) {

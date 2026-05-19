@@ -94,7 +94,7 @@ func (r *Runtime) runHealthCheck(ctx context.Context, req agentwrap.HealthCheckR
 			if err == nil {
 				err = errors.New("workdir is not a directory")
 			}
-			sdkErr := agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode workdir", "working directory is invalid", err, agentwrap.WithDebugDetail(req.WorkDir), agentwrap.WithUserActionable(true), agentwrap.WithUnrecoverable(true))
+			sdkErr := agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode workdir", "working directory is invalid", err, agentwrap.WithDebugDetail(req.WorkDir))
 			return healthResult(r.now, check, agentwrap.HealthUnrecoverable, agentwrap.HealthSeverityError, sdkErr.UserDetail, sdkErr.DebugDetail, nil, sdkErr)
 		}
 		return healthResult(r.now, check, agentwrap.HealthReady, agentwrap.HealthSeverityInfo, "working directory is valid", "", nil, nil)

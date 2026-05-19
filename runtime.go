@@ -48,7 +48,7 @@ type RunResult struct {
 	RunID      RunID
 	SessionID  SessionID
 	TurnID     TurnID
-	Status     LifecycleState
+	Status     RunStatus
 	Metadata   RunMetadata
 	Artifacts  []ArtifactRef
 	Warnings   []string

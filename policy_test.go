@@ -28,7 +28,7 @@ func TestPolicyRunnerRetriesThenSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wait error: %v", err)
 	}
-	if result.Status != StateCompleted {
+	if result.Status != StatusCompleted {
 		t.Fatalf("status = %s, want completed", result.Status)
 	}
 	if runtime.starts != 2 {
@@ -47,7 +47,7 @@ func TestPolicyRunnerRetriesThenSucceeds(t *testing.T) {
 }
 
 func TestPolicyRunnerFallbackThenRetriesOnFallbackTarget(t *testing.T) {
-	primaryErr := NewError(ErrorRuntimeExit, "primary", "primary failed", nil, WithRetryable(false), WithFallbackable(true))
+	primaryErr := NewError(ErrorRuntimeExit, "primary", "primary failed", nil)
 	fallbackErr := NewError(ErrorTimeout, "fallback", "fallback timeout", nil)
 	primary := &scriptRuntime{name: "primary", results: []scriptResult{{err: primaryErr}}}
 	fallback := &scriptRuntime{name: "fallback", provider: "anthropic", model: "claude", results: []scriptResult{
@@ -87,6 +87,44 @@ func TestPolicyRunnerFallbackThenRetriesOnFallbackTarget(t *testing.T) {
 	}
 	if !hasDecision(result.Metadata.Policy.Decisions, PolicyDecisionFallback) || !hasDecision(result.Metadata.Policy.Decisions, PolicyDecisionRetry) {
 		t.Fatalf("decisions = %#v, want fallback and retry", result.Metadata.Policy.Decisions)
+	}
+}
+
+func TestPolicyRunnerHonorsShouldFallbackBeforeRuntimeExitFallback(t *testing.T) {
+	primaryErr := NewError(ErrorRuntimeExit, "primary", "primary failed", nil)
+	primary := &scriptRuntime{name: "primary", results: []scriptResult{{err: primaryErr}, {}}}
+	fallback := &scriptRuntime{name: "fallback", results: []scriptResult{{}}}
+	runner := PolicyRunner{
+		Runtime: primary,
+		Alternatives: []FallbackAlternative{{
+			Name:    "fallback",
+			Runtime: fallback,
+		}},
+		Policy: BasicPolicy{
+			MaxAttemptsPerTarget: 2,
+			Backoff:              FixedBackoff{},
+			ShouldRetry:          func(PolicyContext) bool { return true },
+			ShouldFallback:       func(PolicyContext) bool { return false },
+		},
+		Sleep: noSleep,
+	}
+
+	run, err := runner.StartRun(context.Background(), RunRequest{})
+	if err != nil {
+		t.Fatalf("StartRun error: %v", err)
+	}
+	result, err := run.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait error: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Fatalf("status = %s, want completed", result.Status)
+	}
+	if primary.starts != 2 || fallback.starts != 0 {
+		t.Fatalf("starts primary=%d fallback=%d, want 2/0", primary.starts, fallback.starts)
+	}
+	if hasDecision(result.Metadata.Policy.Decisions, PolicyDecisionFallback) {
+		t.Fatalf("unexpected fallback decision: %#v", result.Metadata.Policy.Decisions)
 	}
 }
 
@@ -178,7 +216,7 @@ func TestPolicyRunnerCancellationDuringBackoff(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Wait error = nil, want cancellation")
 	}
-	if result.Status != StateFailed && result.Status != StateCancelled {
+	if result.Status != StatusFailed && result.Status != StatusCancelled {
 		t.Fatalf("status = %s, want failed or cancelled", result.Status)
 	}
 	if runtime.starts != 1 {
@@ -189,7 +227,7 @@ func TestPolicyRunnerCancellationDuringBackoff(t *testing.T) {
 func TestPolicyRunnerDoesNotBlockOnNoisyRuntimeEvents(t *testing.T) {
 	events := make([]Event, 128)
 	for i := range events {
-		events[i] = Event{Category: EventProgress, Type: "progress"}
+		events[i] = Event{Type: "progress", Payload: EventPayloadWithKind(EventProgress, nil)}
 	}
 	runtime := &scriptRuntime{results: []scriptResult{{events: events}}}
 	runner := PolicyRunner{
@@ -248,9 +286,9 @@ func collectEvents(run Run) []Event {
 	return events
 }
 
-func hasCategory(events []Event, category EventCategory) bool {
+func hasCategory(events []Event, category EventKind) bool {
 	for _, event := range events {
-		if event.Category == category {
+		if event.Kind() == category {
 			return true
 		}
 	}
@@ -332,9 +370,9 @@ func (r *scriptRun) Events() <-chan Event { return r.events }
 
 func (r *scriptRun) Wait(context.Context) (RunResult, error) {
 	<-r.done
-	status := StateCompleted
+	status := StatusCompleted
 	if r.result.err != nil {
-		status = StateFailed
+		status = StatusFailed
 	}
 	now := time.Now().UTC()
 	result := RunResult{

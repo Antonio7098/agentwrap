@@ -4,16 +4,14 @@ import "testing"
 
 func TestLifecycleTerminalStates(t *testing.T) {
 	for _, tc := range []struct {
-		state LifecycleState
+		state RunStatus
 		want  bool
 	}{
-		{state: StateInitialized},
-		{state: StateRunning},
-		{state: StateRetrying},
-		{state: StateCompleted, want: true},
-		{state: StateFailed, want: true},
-		{state: StateCancelled, want: true},
-		{state: StateCleanedUp, want: true},
+		{state: StatusStarting},
+		{state: StatusRunning},
+		{state: StatusCompleted, want: true},
+		{state: StatusFailed, want: true},
+		{state: StatusCancelled, want: true},
 	} {
 		t.Run(string(tc.state), func(t *testing.T) {
 			if got := tc.state.Terminal(); got != tc.want {
