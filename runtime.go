@@ -34,6 +34,7 @@ type RunRequest struct {
 	WantSession   bool
 	SessionAction SessionAction
 	RequireCaps   []Capability
+	RequireHealth []HealthCheckID
 }
 
 // PermissionMode is an open placeholder for future permission policies.
