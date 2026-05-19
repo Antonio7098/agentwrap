@@ -3,47 +3,41 @@ package agentwrap
 import "time"
 
 // LifecycleEvent constructs a canonical lifecycle transition event.
-func LifecycleEvent(runID RunID, sessionID SessionID, turnID TurnID, ctx RuntimeContext, seq int64, at time.Time, from, to LifecycleState, reason string) Event {
+func LifecycleEvent(runID RunID, sessionID SessionID, turnID TurnID, ctx RuntimeContext, seq int64, at time.Time, from, to RunStatus, reason string) Event {
+	_ = ctx
 	return Event{
-		ID:            EventID(string(runID) + "-lifecycle-" + itoa64(seq)),
-		Sequence:      seq,
-		RunID:         runID,
-		SessionID:     sessionID,
-		TurnID:        turnID,
-		CorrelationID: CorrelationID(runID),
-		Context:       ctx,
-		Time:          at,
-		Category:      EventLifecycle,
-		Type:          "lifecycle.transition",
-		Payload: EventPayload{
-			"from":   string(from),
-			"to":     string(to),
-			"reason": reason,
-		},
+		ID:        EventID(string(runID) + "-lifecycle-" + itoa64(seq)),
+		RunID:     runID,
+		SessionID: sessionID,
+		Time:      at,
+		Type:      "lifecycle.transition",
+		Payload: EventPayloadWithKind(EventLifecycle, EventPayload{
+			"from":    string(from),
+			"to":      string(to),
+			"reason":  reason,
+			"turn_id": string(turnID),
+		}),
 	}
 }
 
 // SessionEvent constructs a canonical retained-session relationship event.
 func SessionEvent(runID RunID, sessionID SessionID, turnID TurnID, ctx RuntimeContext, seq int64, at time.Time, metadata SessionMetadata) Event {
+	_ = ctx
 	return Event{
-		ID:            EventID(string(runID) + "-session-" + itoa64(seq)),
-		Sequence:      seq,
-		RunID:         runID,
-		SessionID:     sessionID,
-		TurnID:        turnID,
-		CorrelationID: CorrelationID(runID),
-		Context:       ctx,
-		Time:          at,
-		Category:      EventSession,
-		Type:          "session.relationship",
-		Payload: EventPayload{
+		ID:        EventID(string(runID) + "-session-" + itoa64(seq)),
+		RunID:     runID,
+		SessionID: sessionID,
+		Time:      at,
+		Type:      "session.relationship",
+		Payload: EventPayloadWithKind(EventSession, EventPayload{
 			"requested_action": string(metadata.RequestedAction),
 			"relationship":     string(metadata.Relationship),
 			"requested_id":     string(metadata.RequestedID),
 			"session_id":       string(metadata.ID),
 			"unsupported":      metadata.UnsupportedReason,
 			"best_effort":      metadata.BestEffort,
-		},
+			"turn_id":          string(turnID),
+		}),
 	}
 }
 

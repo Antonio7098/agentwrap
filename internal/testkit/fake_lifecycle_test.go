@@ -14,7 +14,7 @@ func TestRunFakeLifecycleSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []LifecycleState{StateStarting, StateRunning, StateCompleted}
+	want := []RunStatus{StatusStarting, StatusRunning, StatusCompleted}
 	if !reflect.DeepEqual(states, want) {
 		t.Fatalf("states = %#v, want %#v", states, want)
 	}
@@ -37,8 +37,8 @@ func TestRunFakeLifecycleFailureCases(t *testing.T) {
 			if err == nil {
 				t.Fatal("RunFakeLifecycle returned nil error")
 			}
-			if states[len(states)-1] != StateFailed {
-				t.Fatalf("final state = %q, want %q", states[len(states)-1], StateFailed)
+			if states[len(states)-1] != StatusFailed {
+				t.Fatalf("final state = %q, want %q", states[len(states)-1], StatusFailed)
 			}
 		})
 	}

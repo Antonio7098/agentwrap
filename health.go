@@ -147,7 +147,7 @@ func RequiredHealthFailure(report HealthReport, required []HealthCheckID) *SDKEr
 			if result.Err != nil {
 				return result.Err
 			}
-			return NewError(ErrorHealth, "health preflight", "required health check is unsupported", nil, WithDebugDetail(string(result.Check)), WithUserActionable(true), WithUnrecoverable(true))
+			return NewError(ErrorHealth, "health preflight", "required health check is unsupported", nil, WithDebugDetail(string(result.Check)))
 		default:
 			if result.Err != nil {
 				return result.Err
@@ -158,7 +158,7 @@ func RequiredHealthFailure(report HealthReport, required []HealthCheckID) *SDKEr
 	if explicitRequired {
 		for check := range requiredSet {
 			if !seen[check] {
-				return NewError(ErrorHealth, "health preflight", "required health check is missing", nil, WithDebugDetail(string(check)), WithUserActionable(true), WithUnrecoverable(true))
+				return NewError(ErrorHealth, "health preflight", "required health check is missing", nil, WithDebugDetail(string(check)))
 			}
 		}
 	}
@@ -168,16 +168,11 @@ func RequiredHealthFailure(report HealthReport, required []HealthCheckID) *SDKEr
 // ErrorForHealthStatus constructs a classified error for a health status.
 func ErrorForHealthStatus(check HealthCheckID, status HealthStatus, category ErrorCategory, userDetail, debugDetail string, cause error) *SDKError {
 	opts := []ErrorOption{WithDebugDetail(debugDetail)}
-	switch status {
-	case HealthUnrecoverable, HealthUnsupported:
-		opts = append(opts, WithUnrecoverable(true), WithUserActionable(true), WithRetryable(false))
-	case HealthTransientFail, HealthDegraded:
-		opts = append(opts, WithRetryable(true), WithFallbackable(true))
-	case HealthUnknown:
-		opts = append(opts, WithFallbackable(true))
-	}
 	if category == "" {
 		category = ErrorHealth
+	}
+	if status != "" {
+		opts = append(opts, WithMetadata(map[string]string{"health_status": string(status), "health_check": string(check)}))
 	}
 	if debugDetail == "" {
 		opts[0] = WithDebugDetail(string(check))

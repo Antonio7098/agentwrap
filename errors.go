@@ -3,6 +3,7 @@ package agentwrap
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrorCategory classifies public SDK failures without string matching.
@@ -29,17 +30,22 @@ const (
 
 // SDKError is the public classified error type.
 type SDKError struct {
-	Category    ErrorCategory
-	Operation   string
-	UserDetail  string
-	DebugDetail string
-	// SafeDetail is retained as a compatibility alias for UserDetail.
-	SafeDetail     string
-	Retryable      bool
-	Fallbackable   bool
-	UserActionable bool
-	Unrecoverable  bool
-	Cause          error
+	Category        ErrorCategory
+	Operation       string
+	UserDetail      string
+	DebugDetail     string
+	StatusCode      int
+	ResponseHeaders map[string]string
+	ResponseBody    string
+	Provider        ProviderID
+	Model           ModelID
+	RuntimeKind     RuntimeKind
+	ExitCode        *int
+	Signal          string
+	NativeType      string
+	RetryAfter      time.Duration
+	Metadata        map[string]string
+	Cause           error
 }
 
 func (e *SDKError) Error() string {
@@ -47,12 +53,12 @@ func (e *SDKError) Error() string {
 		return "<nil>"
 	}
 	if e.Operation == "" {
-		return string(e.Category) + ": " + e.safeUserDetail()
+		return string(e.Category) + ": " + e.UserDetail
 	}
-	if e.safeUserDetail() == "" {
+	if e.UserDetail == "" {
 		return fmt.Sprintf("%s: %s", e.Operation, e.Category)
 	}
-	return fmt.Sprintf("%s: %s: %s", e.Operation, e.Category, e.safeUserDetail())
+	return fmt.Sprintf("%s: %s: %s", e.Operation, e.Category, e.UserDetail)
 }
 
 // Unwrap returns the wrapped cause.
@@ -72,18 +78,10 @@ func NewError(category ErrorCategory, operation, userDetail string, cause error,
 		Category:   category,
 		Operation:  operation,
 		UserDetail: userDetail,
-		SafeDetail: userDetail,
 		Cause:      cause,
 	}
-	applyDefaultClassification(err)
 	for _, opt := range opts {
 		opt(err)
-	}
-	if err.SafeDetail == "" {
-		err.SafeDetail = err.UserDetail
-	}
-	if err.UserDetail == "" {
-		err.UserDetail = err.SafeDetail
 	}
 	return err
 }
@@ -100,58 +98,59 @@ func WithDebugDetail(detail string) ErrorOption {
 	}
 }
 
-// WithRetryable overrides whether retry policy may retry this failure.
-func WithRetryable(v bool) ErrorOption {
+// WithStatusCode records an HTTP-like status code when the runtime exposes one.
+func WithStatusCode(status int) ErrorOption {
 	return func(err *SDKError) {
-		err.Retryable = v
+		err.StatusCode = status
 	}
 }
 
-// WithFallbackable overrides whether fallback policy may switch alternatives.
-func WithFallbackable(v bool) ErrorOption {
+func WithResponse(headers map[string]string, body string) ErrorOption {
 	return func(err *SDKError) {
-		err.Fallbackable = v
+		err.ResponseHeaders = cloneStringMap(headers)
+		err.ResponseBody = body
 	}
 }
 
-// WithUserActionable overrides whether the caller can likely fix the failure.
-func WithUserActionable(v bool) ErrorOption {
+func WithProviderModel(provider ProviderID, model ModelID) ErrorOption {
 	return func(err *SDKError) {
-		err.UserActionable = v
+		err.Provider = provider
+		err.Model = model
 	}
 }
 
-// WithUnrecoverable overrides whether policy should treat the failure as final.
-func WithUnrecoverable(v bool) ErrorOption {
+func WithRuntimeKind(kind RuntimeKind) ErrorOption {
 	return func(err *SDKError) {
-		err.Unrecoverable = v
+		err.RuntimeKind = kind
 	}
 }
 
-func (e *SDKError) safeUserDetail() string {
-	if e == nil {
-		return ""
+func WithExitCode(exitCode int) ErrorOption {
+	return func(err *SDKError) {
+		err.ExitCode = &exitCode
 	}
-	if e.UserDetail != "" {
-		return e.UserDetail
-	}
-	return e.SafeDetail
 }
 
-func applyDefaultClassification(err *SDKError) {
-	switch err.Category {
-	case ErrorConfiguration, ErrorAuthentication, ErrorPermission, ErrorValidation:
-		err.UserActionable = true
-	case ErrorHealth, ErrorRuntimeUnavailable, ErrorProviderUnavailable, ErrorModelUnavailable:
-		err.Retryable = true
-		err.Fallbackable = true
-	case ErrorRateLimit, ErrorTimeout, ErrorRuntimeExit, ErrorCleanup:
-		err.Retryable = true
-	case ErrorCancellation:
-		err.UserActionable = true
-	case ErrorMalformedEvent, ErrorRepairExhausted:
-		err.Fallbackable = true
-	case ErrorUnknown:
-		err.Fallbackable = true
+func WithSignal(signal string) ErrorOption {
+	return func(err *SDKError) {
+		err.Signal = signal
+	}
+}
+
+func WithNativeType(nativeType string) ErrorOption {
+	return func(err *SDKError) {
+		err.NativeType = nativeType
+	}
+}
+
+func WithRetryAfter(delay time.Duration) ErrorOption {
+	return func(err *SDKError) {
+		err.RetryAfter = delay
+	}
+}
+
+func WithMetadata(metadata map[string]string) ErrorOption {
+	return func(err *SDKError) {
+		err.Metadata = cloneStringMap(metadata)
 	}
 }

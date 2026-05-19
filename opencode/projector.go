@@ -34,6 +34,8 @@ func projectNative(in projectionInput) projectionResult {
 	payload := agentwrap.EventPayload{
 		"native_type": record.Type,
 		"line":        record.Line,
+		"turn_id":     string(in.turnID),
+		"context":     in.ctx,
 	}
 	for k, v := range record.Data {
 		if k == "type" || k == "timestamp" {
@@ -42,17 +44,12 @@ func projectNative(in projectionInput) projectionResult {
 		payload[k] = v
 	}
 	event := agentwrap.Event{
-		ID:            agentwrap.EventID(fmt.Sprintf("%s:%d", in.runID, in.seq)),
-		Sequence:      in.seq,
-		RunID:         in.runID,
-		SessionID:     firstSessionID(agentwrap.SessionID(record.SessionID), agentwrap.SessionID(stringValue(record.Data["sessionID"]))),
-		TurnID:        in.turnID,
-		CorrelationID: agentwrap.CorrelationID(in.runID),
-		Context:       in.ctx,
-		Time:          eventTime(record.Timestamp, in.now),
-		Category:      category,
-		Type:          typ,
-		Payload:       payload,
+		ID:        agentwrap.EventID(fmt.Sprintf("%s:%d", in.runID, in.seq)),
+		RunID:     in.runID,
+		SessionID: firstSessionID(agentwrap.SessionID(record.SessionID), agentwrap.SessionID(stringValue(record.Data["sessionID"]))),
+		Time:      eventTime(record.Timestamp, in.now),
+		Type:      typ,
+		Payload:   agentwrap.EventPayloadWithKind(category, payload),
 		Raw: &agentwrap.RawPayload{
 			Source:   "opencode.stdout",
 			Encoding: "json",
@@ -83,7 +80,7 @@ func projectNative(in projectionInput) projectionResult {
 		if classified := classifyRateLimitData("opencode event", record.Data, in.ctx); classified != nil {
 			result.fatal = classified.err
 			result.rateLimit = classified.info
-			payload["rate_limit"] = classified.info
+			event.Payload["rate_limit"] = classified.info
 		} else {
 			result.fatal = agentwrap.NewError(agentwrap.ErrorRuntimeExit, "opencode event", "OpenCode reported a fatal session error", nil, agentwrap.WithDebugDetail(messageFrom(record.Data)))
 		}
@@ -91,7 +88,7 @@ func projectNative(in projectionInput) projectionResult {
 	return result
 }
 
-func classify(record nativeRecord) (agentwrap.EventCategory, string) {
+func classify(record nativeRecord) (agentwrap.EventKind, string) {
 	nativeType := strings.TrimSpace(record.Type)
 	switch nativeType {
 	case "step_start":

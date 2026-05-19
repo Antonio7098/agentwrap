@@ -135,14 +135,16 @@ func (b ExponentialBackoff) Delay(ctx PolicyContext) time.Duration {
 	return result
 }
 
-// BasicPolicy is a conservative bounded policy helper. It retries only
-// classified retryable failures and falls back only to configured alternatives.
+// BasicPolicy is a conservative bounded policy helper. It classifies failure
+// facts at decision time and falls back only to configured alternatives.
 type BasicPolicy struct {
 	MaxAttemptsPerTarget int
 	MaxElapsed           time.Duration
 	Backoff              BackoffPolicy
 	RetryRateLimits      bool
 	Fallbacks            []FallbackAlternative
+	ShouldRetry          func(PolicyContext) bool
+	ShouldFallback       func(PolicyContext) bool
 }
 
 // Decide implements ResiliencePolicy.
@@ -153,16 +155,16 @@ func (p BasicPolicy) Decide(ctx context.Context, policyCtx PolicyContext) (Polic
 	if policyCtx.Err == nil {
 		return PolicyDecision{Kind: PolicyDecisionStop, Reason: "attempt completed"}, nil
 	}
-	if policyCtx.Err.Unrecoverable {
-		return p.fallbackOrStop(policyCtx, "unrecoverable failure")
-	}
 	if p.MaxElapsed > 0 && policyCtx.Elapsed >= p.MaxElapsed {
 		return PolicyDecision{Kind: PolicyDecisionStop, Reason: "max elapsed time exhausted", Err: policyCtx.Err}, nil
 	}
 	if policyCtx.Err.Category == ErrorRateLimit && !p.RetryRateLimits {
 		return p.fallbackOrStop(policyCtx, "rate limit retry disabled")
 	}
-	if shouldRetry(policyCtx.Err) && p.canRetry(policyCtx) {
+	if policyCtx.Err.Category == ErrorRuntimeExit && p.hasFallback(policyCtx) {
+		return p.fallbackOrStop(policyCtx, "runtime exit")
+	}
+	if p.shouldRetry(policyCtx) && p.canRetry(policyCtx) {
 		delay := p.delay(policyCtx)
 		reason := "retryable failure"
 		if policyCtx.Err.Category == ErrorRateLimit {
@@ -207,7 +209,7 @@ func (p BasicPolicy) delay(ctx PolicyContext) time.Duration {
 }
 
 func (p BasicPolicy) fallbackOrStop(ctx PolicyContext, reason string) (PolicyDecision, error) {
-	if ctx.Err != nil && ctx.Err.Fallbackable {
+	if ctx.Err != nil && p.shouldFallback(ctx) {
 		fallbacks := p.Fallbacks
 		if len(fallbacks) == 0 {
 			fallbacks = ctx.Alternatives
@@ -229,11 +231,56 @@ func (p BasicPolicy) fallbackOrStop(ctx PolicyContext, reason string) (PolicyDec
 	return PolicyDecision{Kind: PolicyDecisionStop, Reason: reason, Detail: safeErrDetail(ctx.Err), Err: ctx.Err}, nil
 }
 
-func shouldRetry(err *SDKError) bool {
-	if err == nil || err.Unrecoverable || err.Category == ErrorUnknown {
+func (p BasicPolicy) hasFallback(ctx PolicyContext) bool {
+	fallbacks := p.Fallbacks
+	if len(fallbacks) == 0 {
+		fallbacks = ctx.Alternatives
+	}
+	return ctx.TargetIndex+1 < len(fallbacks)+1
+}
+
+func (p BasicPolicy) shouldRetry(ctx PolicyContext) bool {
+	if p.ShouldRetry != nil {
+		return p.ShouldRetry(ctx)
+	}
+	return defaultRetryable(ctx)
+}
+
+func (p BasicPolicy) shouldFallback(ctx PolicyContext) bool {
+	if p.ShouldFallback != nil {
+		return p.ShouldFallback(ctx)
+	}
+	return defaultFallbackable(ctx)
+}
+
+func defaultRetryable(ctx PolicyContext) bool {
+	err := ctx.Err
+	if err == nil {
 		return false
 	}
-	return err.Retryable
+	switch err.Category {
+	case ErrorTimeout, ErrorRuntimeExit, ErrorRuntimeUnavailable, ErrorProviderUnavailable, ErrorModelUnavailable, ErrorMalformedEvent:
+		return true
+	case ErrorRateLimit:
+		return ctx.RateLimit != nil || err.RetryAfter > 0 || err.StatusCode == 429 || err.StatusCode == 503
+	default:
+		return false
+	}
+}
+
+func defaultFallbackable(ctx PolicyContext) bool {
+	err := ctx.Err
+	if err == nil {
+		return false
+	}
+	switch err.Category {
+	case ErrorAuthentication, ErrorPermission, ErrorConfiguration, ErrorCancellation:
+		return false
+	case ErrorRateLimit, ErrorTimeout, ErrorRuntimeExit, ErrorRuntimeUnavailable, ErrorProviderUnavailable, ErrorModelUnavailable, ErrorMalformedEvent, ErrorValidation, ErrorUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 // PolicyRunner executes a runtime run through a resilience policy.
@@ -248,7 +295,7 @@ type PolicyRunner struct {
 // StartRun starts policy execution and returns a logical run handle.
 func (r PolicyRunner) StartRun(ctx context.Context, req RunRequest) (Run, error) {
 	if r.Runtime == nil {
-		return nil, NewError(ErrorConfiguration, "policy runner", "primary runtime is required", nil, WithUserActionable(true), WithUnrecoverable(true))
+		return nil, NewError(ErrorConfiguration, "policy runner", "primary runtime is required", nil)
 	}
 	policy := r.Policy
 	if policy == nil {
@@ -285,7 +332,7 @@ func (r PolicyRunner) StartRun(ctx context.Context, req RunRequest) (Run, error)
 // Capabilities reports the primary runtime capabilities.
 func (r PolicyRunner) Capabilities(ctx context.Context) (Capabilities, error) {
 	if r.Runtime == nil {
-		return Capabilities{}, NewError(ErrorConfiguration, "policy runner capabilities", "primary runtime is required", nil, WithUserActionable(true), WithUnrecoverable(true))
+		return Capabilities{}, NewError(ErrorConfiguration, "policy runner capabilities", "primary runtime is required", nil)
 	}
 	return r.Runtime.Capabilities(ctx)
 }
@@ -368,7 +415,7 @@ func (r *policyRun) execute() {
 		started := r.now()
 		run, startErr := runtime.StartRun(r.ctx, req)
 		if startErr != nil {
-			last = RunResult{RunID: "", Status: StateFailed, StartedAt: started, FinishedAt: r.now(), Err: ensureSDKError(startErr, "policy attempt start")}
+			last = RunResult{RunID: "", Status: StatusFailed, StartedAt: started, FinishedAt: r.now(), Err: ensureSDKError(startErr, "policy attempt start")}
 		} else {
 			r.setCurrent(run)
 			eventsDone := make(chan struct{})
@@ -438,7 +485,7 @@ func (r *policyRun) execute() {
 			targetIndex = decision.TargetIndex
 			req = fallbackRequest(r.original, decision, r.targetFor(targetIndex))
 		default:
-			last.Err = NewError(ErrorConfiguration, "policy decision", "unsupported policy decision", nil, WithDebugDetail(string(decision.Kind)), WithUserActionable(true), WithUnrecoverable(true))
+			last.Err = NewError(ErrorConfiguration, "policy decision", "unsupported policy decision", nil, WithDebugDetail(string(decision.Kind)))
 			r.finish(last, last.Err, true, "unsupported policy decision")
 			return
 		}
@@ -492,9 +539,6 @@ func (r *policyRun) clearCurrent(run Run) {
 
 func (r *policyRun) forwardEvents(events <-chan Event, attempt, targetIndex int) {
 	for event := range events {
-		if event.CorrelationID == "" {
-			event.CorrelationID = CorrelationID(r.id)
-		}
 		if event.Payload == nil {
 			event.Payload = EventPayload{}
 		}
@@ -511,12 +555,8 @@ func (r *policyRun) sendEvent(event Event) {
 	if event.ID == "" {
 		event.ID = EventID(fmt.Sprintf("%s-event-%d", r.id, r.seq))
 	}
-	event.Sequence = r.seq
 	if event.RunID == "" {
 		event.RunID = r.id
-	}
-	if event.CorrelationID == "" {
-		event.CorrelationID = CorrelationID(r.id)
 	}
 	if event.Time.IsZero() {
 		event.Time = r.now()
@@ -534,11 +574,10 @@ func (r *policyRun) recordDroppedEvent(event Event) {
 	r.eventMu.Lock()
 	defer r.eventMu.Unlock()
 	r.droppedEvents = append(r.droppedEvents, PolicyDroppedEvent{
-		CorrelationID: event.CorrelationID,
-		Category:      event.Category,
-		Type:          event.Type,
-		RunID:         event.RunID,
-		At:            r.now(),
+		Kind:  event.Kind(),
+		Type:  event.Type,
+		RunID: event.RunID,
+		At:    r.now(),
 	})
 }
 
@@ -550,9 +589,9 @@ func (r *policyRun) summarizeAttempt(attempt, attemptOnTarget, targetIndex int, 
 	status := result.Status
 	if status == "" {
 		if result.Err != nil {
-			status = StateFailed
+			status = StatusFailed
 		} else {
-			status = StateCompleted
+			status = StatusCompleted
 		}
 	}
 	summary := AttemptSummary{
@@ -605,12 +644,9 @@ func (r *policyRun) recordDecision(attempt, targetIndex int, decision PolicyDeci
 	}
 	if decision.RateLimit != nil {
 		r.sendEvent(Event{
-			RunID:         r.id,
-			CorrelationID: CorrelationID(r.id),
-			Context:       record.Context,
-			Category:      EventRateLimit,
-			Type:          "rate_limit",
-			Payload: EventPayload{
+			RunID: r.id,
+			Type:  "rate_limit",
+			Payload: EventPayloadWithKind(EventRateLimit, EventPayload{
 				"attempt":      attempt,
 				"target_index": targetIndex,
 				"provider":     decision.RateLimit.Provider,
@@ -618,16 +654,13 @@ func (r *policyRun) recordDecision(attempt, targetIndex int, decision PolicyDeci
 				"retry_after":  decision.RateLimit.RetryAfter.String(),
 				"reset_at":     decision.RateLimit.ResetAt,
 				"detail":       decision.RateLimit.UserDetail,
-			},
+			}),
 		})
 	}
 	r.sendEvent(Event{
-		RunID:         r.id,
-		CorrelationID: CorrelationID(r.id),
-		Context:       record.Context,
-		Category:      category,
-		Type:          eventType,
-		Payload: EventPayload{
+		RunID: r.id,
+		Type:  eventType,
+		Payload: EventPayloadWithKind(category, EventPayload{
 			"attempt":        attempt,
 			"target_index":   targetIndex,
 			"decision":       decision.Kind,
@@ -635,7 +668,7 @@ func (r *policyRun) recordDecision(attempt, targetIndex int, decision PolicyDeci
 			"detail":         decision.Detail,
 			"delay":          decision.Delay.String(),
 			"session_action": decision.SessionAction,
-		},
+		}),
 	})
 }
 
@@ -652,9 +685,9 @@ func (r *policyRun) finish(result RunResult, err *SDKError, exhausted bool, reas
 	}
 	if result.Status == "" {
 		if err != nil {
-			result.Status = StateFailed
+			result.Status = StatusFailed
 		} else {
-			result.Status = StateCompleted
+			result.Status = StatusCompleted
 		}
 	}
 	if err != nil {
@@ -699,7 +732,7 @@ func (r *policyRun) snapshotDroppedEvents() []PolicyDroppedEvent {
 
 func (r *policyRun) finishCancelled(last RunResult) {
 	err := contextPolicyError(r.ctx.Err())
-	last.Status = StateCancelled
+	last.Status = StatusCancelled
 	last.Err = err
 	r.finish(last, err, true, "policy run cancelled")
 }
@@ -892,7 +925,7 @@ func safeErrDetail(err *SDKError) string {
 	if err.UserDetail != "" {
 		return err.UserDetail
 	}
-	return err.SafeDetail
+	return err.DebugDetail
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

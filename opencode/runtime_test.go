@@ -151,13 +151,13 @@ func TestRunSuccessEmitsCanonicalEventsAndResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, result := drainRun(t, run)
-	if result.Err != nil || result.Status != agentwrap.StateCompleted {
+	if result.Err != nil || result.Status != agentwrap.StatusCompleted {
 		t.Fatalf("result = %#v err=%v", result, result.Err)
 	}
 	if len(events) != 6 {
 		t.Fatalf("events = %d, want 6", len(events))
 	}
-	if events[0].Category != agentwrap.EventLifecycle || events[1].Category != agentwrap.EventSession || events[2].Category != agentwrap.EventProgress || events[3].Category != agentwrap.EventMessage || events[4].Category != agentwrap.EventFinalResult || events[5].Category != agentwrap.EventLifecycle {
+	if events[0].Kind() != agentwrap.EventLifecycle || events[1].Kind() != agentwrap.EventSession || events[2].Kind() != agentwrap.EventProgress || events[3].Kind() != agentwrap.EventMessage || events[4].Kind() != agentwrap.EventFinalResult || events[5].Kind() != agentwrap.EventLifecycle {
 		t.Fatalf("unexpected categories: %#v", events)
 	}
 	if events[2].Raw == nil || events[2].Raw.Safe {
@@ -176,11 +176,11 @@ func TestRunUnknownEventDoesNotFail(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, result := drainRun(t, run)
-	if result.Err != nil || result.Status != agentwrap.StateCompleted {
+	if result.Err != nil || result.Status != agentwrap.StatusCompleted {
 		t.Fatalf("result = %#v err=%v", result, result.Err)
 	}
-	if events[2].Category != agentwrap.EventNativeExtension {
-		t.Fatalf("native category = %s", events[2].Category)
+	if events[2].Kind() != agentwrap.EventNativeExtension {
+		t.Fatalf("native category = %s", events[2].Kind())
 	}
 	if got := result.Metadata.NativeMetadata["native_extension_count"]; got != 1 {
 		t.Fatalf("native_extension_count = %#v, want 1", got)
@@ -198,10 +198,10 @@ func TestRunProjectsUsageAndArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, result := drainRun(t, run)
-	if result.Status != agentwrap.StateCompleted {
+	if result.Status != agentwrap.StatusCompleted {
 		t.Fatalf("status = %s", result.Status)
 	}
-	if len(events) != 6 || events[2].Category != agentwrap.EventUsage || events[3].Category != agentwrap.EventArtifact || events[4].Category != agentwrap.EventFinalResult {
+	if len(events) != 6 || events[2].Kind() != agentwrap.EventUsage || events[3].Kind() != agentwrap.EventArtifact || events[4].Kind() != agentwrap.EventFinalResult {
 		t.Fatalf("unexpected events: %#v", events)
 	}
 	if result.Usage.TotalTokens == nil || *result.Usage.TotalTokens != 12 {
@@ -254,7 +254,7 @@ func TestRunMalformedFails(t *testing.T) {
 	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorMalformedEvent {
 		t.Fatalf("err = %v result=%#v", err, result)
 	}
-	if result.Status != agentwrap.StateFailed {
+	if result.Status != agentwrap.StatusFailed {
 		t.Fatalf("status = %s", result.Status)
 	}
 }
@@ -262,7 +262,7 @@ func TestRunMalformedFails(t *testing.T) {
 func TestClassifyExitErrorDetectsJSONRateLimit(t *testing.T) {
 	stderr := `{"statusCode":429,"responseHeaders":{"retry-after-ms":"1500","x-ratelimit-limit-requests":"500","x-ratelimit-remaining-requests":"0","x-ratelimit-reset-requests":"1s"},"responseBody":"{\"type\":\"error\",\"error\":{\"type\":\"too_many_requests\"}}","message":"too many requests"}`
 	err := classifyExitError(processResult{ExitCode: 1}, stderr)
-	if err == nil || err.Category != agentwrap.ErrorRateLimit || !err.Retryable {
+	if err == nil || err.Category != agentwrap.ErrorRateLimit {
 		t.Fatalf("err = %#v, want retryable rate limit", err)
 	}
 }
@@ -435,11 +435,11 @@ func TestCancelClassifiesRunAsCancelled(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, result, err := drainRunErr(t, run)
-	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorCancellation || result.Status != agentwrap.StateCancelled {
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorCancellation || result.Status != agentwrap.StatusCancelled {
 		t.Fatalf("err = %v result=%#v", err, result)
 	}
-	requireLifecycleTransition(t, events, agentwrap.StateRunning, agentwrap.StateCancelled, "caller_cancel")
-	requireLifecycleTransition(t, events, agentwrap.StateCancelled, agentwrap.StateCleanedUp, "caller_cancel")
+	requireLifecycleTransition(t, events, agentwrap.StatusRunning, agentwrap.StatusCancelled, "caller_cancel")
+	requireLifecycleTransition(t, events, agentwrap.StatusCancelled, agentwrap.StatusCompleted, "caller_cancel")
 }
 
 func TestContextTimeoutClassifiesRunAsTimeout(t *testing.T) {
@@ -469,7 +469,7 @@ func TestBlockedStdoutTimeoutStaysTimeout(t *testing.T) {
 	if result.Err == nil || result.Err.Category != agentwrap.ErrorTimeout {
 		t.Fatalf("result err = %#v", result.Err)
 	}
-	if result.Status != agentwrap.StateFailed {
+	if result.Status != agentwrap.StatusFailed {
 		t.Fatalf("status = %s", result.Status)
 	}
 }
@@ -482,7 +482,7 @@ func TestCleanupFailureDoesNotOverwritePrimarySuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, result := drainRun(t, run)
-	if result.Status != agentwrap.StateCompleted || result.Err != nil {
+	if result.Status != agentwrap.StatusCompleted || result.Err != nil {
 		t.Fatalf("primary result changed: %#v", result)
 	}
 	if !result.Metadata.Cleanup.Failed || result.Metadata.Cleanup.Error == nil || result.Metadata.Cleanup.Error.Category != agentwrap.ErrorCleanup {
@@ -524,10 +524,10 @@ func TestCancelOneConcurrentRunDoesNotAffectAnother(t *testing.T) {
 	}
 	_, result1, err1 := drainRunErr(t, run1)
 	_, result2 := drainRun(t, run2)
-	if err1 == nil || result1.Status != agentwrap.StateCancelled {
+	if err1 == nil || result1.Status != agentwrap.StatusCancelled {
 		t.Fatalf("cancelled result = %#v err=%v", result1, err1)
 	}
-	if result2.Status != agentwrap.StateCompleted || result2.Err != nil {
+	if result2.Status != agentwrap.StatusCompleted || result2.Err != nil {
 		t.Fatalf("second result = %#v", result2)
 	}
 	if cancelled.CancelCount() == 0 {
@@ -591,7 +591,6 @@ func equalStrings(a, b []string) bool {
 type eventSnapshot struct {
 	Category    string   `json:"category"`
 	Type        string   `json:"type"`
-	Sequence    int64    `json:"sequence"`
 	SessionID   string   `json:"session_id"`
 	RawSafe     bool     `json:"raw_safe"`
 	RawSource   string   `json:"raw_source"`
@@ -630,9 +629,8 @@ func snapshotRun(events []agentwrap.Event, result agentwrap.RunResult) runSnapsh
 	}
 	for _, event := range events {
 		next := eventSnapshot{
-			Category:    string(event.Category),
+			Category:    string(event.Kind()),
 			Type:        event.Type,
-			Sequence:    event.Sequence,
 			SessionID:   string(event.SessionID),
 			PayloadKeys: sortedPayloadKeys(event.Payload),
 		}
@@ -667,6 +665,9 @@ func readGoldenSnapshot(t *testing.T, name string) runSnapshot {
 func sortedPayloadKeys(payload agentwrap.EventPayload) []string {
 	keys := make([]string, 0, len(payload))
 	for key := range payload {
+		if key == "event_kind" || key == "turn_id" || key == "context" {
+			continue
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -705,10 +706,10 @@ func intMapValue(value any) map[string]int {
 	return out
 }
 
-func requireLifecycleTransition(t *testing.T, events []agentwrap.Event, from, to agentwrap.LifecycleState, reason string) {
+func requireLifecycleTransition(t *testing.T, events []agentwrap.Event, from, to agentwrap.RunStatus, reason string) {
 	t.Helper()
 	for _, event := range events {
-		if event.Category != agentwrap.EventLifecycle {
+		if event.Kind() != agentwrap.EventLifecycle {
 			continue
 		}
 		if event.Payload["from"] == string(from) && event.Payload["to"] == string(to) && event.Payload["reason"] == reason {

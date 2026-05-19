@@ -3,9 +3,10 @@ package agentwrap
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
-func TestSDKErrorClassificationAndWrapping(t *testing.T) {
+func TestSDKErrorFactsAndWrapping(t *testing.T) {
 	cause := errors.New("native failure")
 	err := NewError(
 		ErrorRateLimit,
@@ -13,7 +14,10 @@ func TestSDKErrorClassificationAndWrapping(t *testing.T) {
 		"provider asked caller to retry later",
 		cause,
 		WithDebugDetail("http 429 from provider"),
-		WithFallbackable(true),
+		WithStatusCode(429),
+		WithResponse(map[string]string{"retry-after": "3"}, `{"error":"limited"}`),
+		WithProviderModel("openai", "gpt"),
+		WithRetryAfter(3*time.Second),
 	)
 
 	if !errors.Is(err, cause) {
@@ -23,43 +27,16 @@ func TestSDKErrorClassificationAndWrapping(t *testing.T) {
 	if !ErrorAs(err, &got) {
 		t.Fatal("ErrorAs did not find SDKError")
 	}
-	if got.Category != ErrorRateLimit {
-		t.Fatalf("Category = %q, want %q", got.Category, ErrorRateLimit)
+	if got.Category != ErrorRateLimit || got.StatusCode != 429 {
+		t.Fatalf("facts = %#v, want rate-limit status 429", got)
 	}
-	if !got.Retryable || !got.Fallbackable {
-		t.Fatalf("classification flags = retryable:%v fallbackable:%v", got.Retryable, got.Fallbackable)
+	if got.ResponseHeaders["retry-after"] != "3" || got.ResponseBody == "" {
+		t.Fatalf("response facts missing: %#v", got)
 	}
-	if got.UserDetail == "" || got.SafeDetail == "" {
-		t.Fatalf("user-safe detail is empty: UserDetail=%q SafeDetail=%q", got.UserDetail, got.SafeDetail)
+	if got.Provider != "openai" || got.Model != "gpt" || got.RetryAfter != 3*time.Second {
+		t.Fatalf("provider/model/retry-after facts missing: %#v", got)
 	}
 	if got.DebugDetail != "http 429 from provider" {
 		t.Fatalf("DebugDetail = %q", got.DebugDetail)
-	}
-}
-
-func TestNewErrorDefaultClassification(t *testing.T) {
-	for _, tc := range []struct {
-		category       ErrorCategory
-		retryable      bool
-		fallbackable   bool
-		userActionable bool
-	}{
-		{category: ErrorConfiguration, userActionable: true},
-		{category: ErrorRuntimeUnavailable, retryable: true, fallbackable: true},
-		{category: ErrorRateLimit, retryable: true},
-		{category: ErrorMalformedEvent, fallbackable: true},
-	} {
-		t.Run(string(tc.category), func(t *testing.T) {
-			err := NewError(tc.category, "test", "detail", nil)
-			if err.Retryable != tc.retryable {
-				t.Fatalf("Retryable = %v, want %v", err.Retryable, tc.retryable)
-			}
-			if err.Fallbackable != tc.fallbackable {
-				t.Fatalf("Fallbackable = %v, want %v", err.Fallbackable, tc.fallbackable)
-			}
-			if err.UserActionable != tc.userActionable {
-				t.Fatalf("UserActionable = %v, want %v", err.UserActionable, tc.userActionable)
-			}
-		})
 	}
 }

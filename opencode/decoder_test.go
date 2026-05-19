@@ -79,7 +79,7 @@ func TestProjectNativeEvents(t *testing.T) {
 	tests := []struct {
 		name         string
 		line         string
-		wantCategory agentwrap.EventCategory
+		wantCategory agentwrap.EventKind
 		wantFinal    bool
 	}{
 		{name: "progress", line: `{"type":"step_start","sessionID":"ses_1"}`, wantCategory: agentwrap.EventProgress},
@@ -107,8 +107,8 @@ func TestProjectNativeEvents(t *testing.T) {
 				seq:    int64(i + 1),
 				record: record,
 			})
-			if projected.event.Category != tt.wantCategory {
-				t.Fatalf("category = %s, want %s", projected.event.Category, tt.wantCategory)
+			if projected.event.Kind() != tt.wantCategory {
+				t.Fatalf("category = %s, want %s", projected.event.Kind(), tt.wantCategory)
 			}
 			if projected.final != tt.wantFinal {
 				t.Fatalf("final = %v, want %v", projected.final, tt.wantFinal)
