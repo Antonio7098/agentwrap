@@ -81,6 +81,7 @@ type PolicyMetadata struct {
 	Exhausted        bool
 	ExhaustedReason  string
 	Decisions        []PolicyDecisionRecord
+	DroppedEvents    []PolicyDroppedEvent
 }
 
 // PolicyDecisionRecord is a durable, user-safe summary of a policy decision.
@@ -94,6 +95,15 @@ type PolicyDecisionRecord struct {
 	Context     RuntimeContext
 	RateLimit   *RateLimitInfo
 	Metadata    map[string]any
+}
+
+// PolicyDroppedEvent records policy event drops caused by slow consumers.
+type PolicyDroppedEvent struct {
+	CorrelationID CorrelationID
+	Category      EventCategory
+	Type          string
+	RunID         RunID
+	At            time.Time
 }
 
 // CleanupMetadata reports owned-resource cleanup separately from the primary

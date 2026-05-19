@@ -116,6 +116,9 @@ func TestBasicPolicyDoesNotRetryUnknownByDefault(t *testing.T) {
 	if result.Metadata.Policy.Decisions[0].Kind != PolicyDecisionStop {
 		t.Fatalf("decision = %#v, want stop", result.Metadata.Policy.Decisions[0])
 	}
+	if hasCategory(collectEvents(run), EventRetry) {
+		t.Fatalf("stop decision emitted retry event")
+	}
 }
 
 func TestPolicyRunnerHonorsRateLimitRetryAfter(t *testing.T) {
@@ -180,6 +183,31 @@ func TestPolicyRunnerCancellationDuringBackoff(t *testing.T) {
 	}
 	if runtime.starts != 1 {
 		t.Fatalf("starts = %d, want 1", runtime.starts)
+	}
+}
+
+func TestPolicyRunnerDoesNotBlockOnNoisyRuntimeEvents(t *testing.T) {
+	events := make([]Event, 128)
+	for i := range events {
+		events[i] = Event{Category: EventProgress, Type: "progress"}
+	}
+	runtime := &scriptRuntime{results: []scriptResult{{events: events}}}
+	runner := PolicyRunner{
+		Runtime: runtime,
+		Policy:  BasicPolicy{},
+		Sleep:   noSleep,
+	}
+
+	run, err := runner.StartRun(context.Background(), RunRequest{})
+	if err != nil {
+		t.Fatalf("StartRun error: %v", err)
+	}
+	result, err := run.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait error: %v", err)
+	}
+	if len(result.Metadata.Policy.DroppedEvents) == 0 {
+		t.Fatalf("expected dropped event metadata for noisy runtime")
 	}
 }
 

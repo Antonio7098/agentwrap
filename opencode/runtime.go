@@ -150,6 +150,7 @@ type run struct {
 	artifacts    []agentwrap.ArtifactRef
 	warnings     []string
 	usage        agentwrap.Usage
+	rateLimit    *agentwrap.RateLimitInfo
 	nativeTypes  map[string]int
 	categories   map[string]int
 	stderrBuffer *limitBuffer
@@ -229,6 +230,9 @@ func (r *run) run() {
 		}
 		r.artifacts = append(r.artifacts, projected.artifacts...)
 		r.warnings = append(r.warnings, projected.warnings...)
+		if projected.rateLimit != nil {
+			r.rateLimit = projected.rateLimit
+		}
 		if projected.fatal != nil {
 			return projected.fatal
 		}
@@ -301,7 +305,9 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 			"native_extension_count": r.categories[string(agentwrap.EventNativeExtension)],
 		},
 	}
-	if sdkErr != nil && sdkErr.Category == agentwrap.ErrorRateLimit {
+	if r.rateLimit != nil {
+		metadata.NativeMetadata["rate_limit_info"] = r.rateLimit
+	} else if sdkErr != nil && sdkErr.Category == agentwrap.ErrorRateLimit {
 		if info := classifyRateLimitText("opencode run", r.stderrBuffer.String(), r.context); info != nil && info.info != nil {
 			metadata.NativeMetadata["rate_limit_info"] = info.info
 		}

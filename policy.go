@@ -305,16 +305,18 @@ type policyRun struct {
 	events chan Event
 	done   chan struct{}
 
-	mu           sync.Mutex
-	result       RunResult
-	waitErr      error
-	current      Run
-	started      time.Time
-	finished     time.Time
-	seq          int64
-	attempts     []AttemptSummary
-	decisions    []PolicyDecisionRecord
-	targetCounts map[int]int
+	mu            sync.Mutex
+	result        RunResult
+	waitErr       error
+	current       Run
+	started       time.Time
+	finished      time.Time
+	seq           int64
+	attempts      []AttemptSummary
+	decisions     []PolicyDecisionRecord
+	eventMu       sync.Mutex
+	droppedEvents []PolicyDroppedEvent
+	targetCounts  map[int]int
 }
 
 func (r *policyRun) ID() RunID { return r.id }
@@ -369,8 +371,13 @@ func (r *policyRun) execute() {
 			last = RunResult{RunID: "", Status: StateFailed, StartedAt: started, FinishedAt: r.now(), Err: ensureSDKError(startErr, "policy attempt start")}
 		} else {
 			r.setCurrent(run)
-			r.forwardEvents(run.Events(), attempt, targetIndex)
+			eventsDone := make(chan struct{})
+			go func() {
+				defer close(eventsDone)
+				r.forwardEvents(run.Events(), attempt, targetIndex)
+			}()
 			result, waitErr := run.Wait(r.ctx)
+			<-eventsDone
 			r.clearCurrent(run)
 			last = result
 			if waitErr != nil && last.Err == nil {
@@ -499,6 +506,7 @@ func (r *policyRun) forwardEvents(events <-chan Event, attempt, targetIndex int)
 }
 
 func (r *policyRun) sendEvent(event Event) {
+	r.eventMu.Lock()
 	r.seq++
 	if event.ID == "" {
 		event.ID = EventID(fmt.Sprintf("%s-event-%d", r.id, r.seq))
@@ -513,10 +521,25 @@ func (r *policyRun) sendEvent(event Event) {
 	if event.Time.IsZero() {
 		event.Time = r.now()
 	}
+	r.eventMu.Unlock()
 	select {
 	case <-r.ctx.Done():
 	case r.events <- event:
+	default:
+		r.recordDroppedEvent(event)
 	}
+}
+
+func (r *policyRun) recordDroppedEvent(event Event) {
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
+	r.droppedEvents = append(r.droppedEvents, PolicyDroppedEvent{
+		CorrelationID: event.CorrelationID,
+		Category:      event.Category,
+		Type:          event.Type,
+		RunID:         event.RunID,
+		At:            r.now(),
+	})
 }
 
 func (r *policyRun) summarizeAttempt(attempt, attemptOnTarget, targetIndex int, req RunRequest, started time.Time, result RunResult) AttemptSummary {
@@ -571,6 +594,9 @@ func (r *policyRun) recordDecision(attempt, targetIndex int, decision PolicyDeci
 		Metadata:    cloneAnyMap(decision.Metadata),
 	}
 	r.decisions = append(r.decisions, record)
+	if decision.Kind == PolicyDecisionStop {
+		return
+	}
 	category := EventRetry
 	eventType := "retry"
 	if decision.Kind == PolicyDecisionFallback {
@@ -644,6 +670,7 @@ func (r *policyRun) finish(result RunResult, err *SDKError, exhausted bool, reas
 		Exhausted:        exhausted,
 		ExhaustedReason:  reason,
 		Decisions:        append([]PolicyDecisionRecord(nil), r.decisions...),
+		DroppedEvents:    r.snapshotDroppedEvents(),
 	}
 	if result.Metadata.StartedAt.IsZero() {
 		result.Metadata.StartedAt = result.StartedAt
@@ -662,6 +689,12 @@ func (r *policyRun) finish(result RunResult, err *SDKError, exhausted bool, reas
 		r.waitErr = nil
 	}
 	r.mu.Unlock()
+}
+
+func (r *policyRun) snapshotDroppedEvents() []PolicyDroppedEvent {
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
+	return append([]PolicyDroppedEvent(nil), r.droppedEvents...)
 }
 
 func (r *policyRun) finishCancelled(last RunResult) {

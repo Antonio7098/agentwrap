@@ -275,6 +275,21 @@ func TestClassifyExitErrorSkipsQuotaExceeded(t *testing.T) {
 	}
 }
 
+func TestClassifyExitErrorSkipsQuotaExceededInMessage(t *testing.T) {
+	stderr := `{"statusCode":429,"message":"quota_exceeded"}`
+	err := classifyExitError(processResult{ExitCode: 1}, stderr)
+	if err == nil || err.Category == agentwrap.ErrorRateLimit {
+		t.Fatalf("err = %#v, want non-rate-limit classification", err)
+	}
+}
+
+func TestParseRetryDelaySupportsHTTPDate(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC1123)
+	if delay := parseRetryDelay(future); delay <= 0 {
+		t.Fatalf("delay = %s, want positive duration from HTTP date", delay)
+	}
+}
+
 func TestClassifyRateLimitDataParsesOpenCodeHeaders(t *testing.T) {
 	classified := classifyRateLimitData("opencode event", map[string]any{
 		"statusCode": 429,
@@ -321,6 +336,28 @@ func TestProjectNativeFatalErrorPromotesRateLimit(t *testing.T) {
 	}
 	if _, ok := projected.event.Payload["rate_limit"]; !ok {
 		t.Fatalf("payload missing rate_limit: %#v", projected.event.Payload)
+	}
+}
+
+func TestRunFatalEventStoresRateLimitMetadata(t *testing.T) {
+	stdout := `{"type":"error","statusCode":429,"message":"too many requests","responseHeaders":{"retry-after-ms":"500"}}
+`
+	runner := &fakeRunner{proc: &fakeProcess{stdout: stdout}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello", Provider: "openai", Model: "gpt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorRateLimit {
+		t.Fatalf("err = %v result=%#v", err, result)
+	}
+	info, ok := result.Metadata.NativeMetadata["rate_limit_info"].(*agentwrap.RateLimitInfo)
+	if !ok || info == nil {
+		t.Fatalf("rate_limit_info = %#v", result.Metadata.NativeMetadata["rate_limit_info"])
+	}
+	if info.RetryAfter != 500*time.Millisecond {
+		t.Fatalf("retry_after = %s, want 500ms", info.RetryAfter)
 	}
 }
 

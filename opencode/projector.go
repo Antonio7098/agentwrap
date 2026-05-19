@@ -25,6 +25,7 @@ type projectionResult struct {
 	artifacts []agentwrap.ArtifactRef
 	warnings  []string
 	fatal     *agentwrap.SDKError
+	rateLimit *agentwrap.RateLimitInfo
 }
 
 func projectNative(in projectionInput) projectionResult {
@@ -81,6 +82,7 @@ func projectNative(in projectionInput) projectionResult {
 		result.final = true
 		if classified := classifyRateLimitData("opencode event", record.Data, in.ctx); classified != nil {
 			result.fatal = classified.err
+			result.rateLimit = classified.info
 			payload["rate_limit"] = classified.info
 		} else {
 			result.fatal = agentwrap.NewError(agentwrap.ErrorRuntimeExit, "opencode event", "OpenCode reported a fatal session error", nil, agentwrap.WithDebugDetail(messageFrom(record.Data)))

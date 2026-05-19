@@ -54,10 +54,12 @@ func classifyRateLimitDetails(op, message, body string, headers, metadata map[st
 	normalizedBody := strings.ToLower(body)
 	normalizedMessage := strings.ToLower(message)
 	if status == 429 {
-		if containsAny(normalizedBody, "insufficient_quota", "quota_exceeded", "freeusagelimiterror") {
+		if containsAny(normalizedBody, "insufficient_quota", "quota_exceeded", "freeusagelimiterror") ||
+			containsAny(normalizedMessage, "insufficient_quota", "quota_exceeded", "freeusagelimiterror", "quota exceeded") {
 			return nil
 		}
-		if containsAny(normalizedBody, "content_policy", "content_filter", "safety") {
+		if containsAny(normalizedBody, "content_policy", "content_filter", "safety") ||
+			containsAny(normalizedMessage, "content_policy", "content_filter", "safety") {
 			return nil
 		}
 		info := rateLimitInfoFrom(headers, metadata, runtimeCtx, body, message, "http_429")
@@ -89,8 +91,6 @@ func parseStructuredRateLimitText(text string) (status int, body, message string
 	if text == "" {
 		return 0, "", "", nil, nil
 	}
-	headers = nil
-	metadata = nil
 	var payload map[string]any
 	if json.Unmarshal([]byte(text), &payload) != nil {
 		return 0, text, text, nil, nil
@@ -187,12 +187,14 @@ func rateLimitInfoFrom(headers, metadata map[string]string, runtimeCtx agentwrap
 
 func userRateLimitDetail(body, message string) string {
 	lowerBody := strings.ToLower(body)
+	lowerMessage := strings.ToLower(message)
+	lower := lowerBody + " " + lowerMessage
 	switch {
-	case strings.Contains(lowerBody, "gousagelimiterror"):
+	case strings.Contains(lower, "gousagelimiterror"):
 		return "OpenCode account rate limit reached"
-	case strings.Contains(lowerBody, "freeusagelimiterror"):
+	case strings.Contains(lower, "freeusagelimiterror"):
 		return "OpenCode free-tier usage limit reached"
-	case strings.Contains(lowerBody, "resource_exhausted"), strings.Contains(lowerBody, "\"unavailable\""):
+	case strings.Contains(lower, "resource_exhausted"), strings.Contains(lower, "\"unavailable\""):
 		return "OpenCode provider is overloaded"
 	}
 	if strings.TrimSpace(message) != "" {
@@ -206,7 +208,7 @@ func debugRateLimitDetail(status int, headers map[string]string, body, message s
 }
 
 func parseRetryDelay(value string) time.Duration {
-	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0
 	}
@@ -223,7 +225,7 @@ func parseRetryDelay(value string) time.Duration {
 			return delay
 		}
 	}
-	if parsed, err := time.ParseDuration(value); err == nil {
+	if parsed, err := time.ParseDuration(strings.ToLower(value)); err == nil {
 		return parsed
 	}
 	return 0
