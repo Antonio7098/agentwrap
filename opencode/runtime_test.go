@@ -49,11 +49,11 @@ type fakeProcess struct {
 	mu          sync.Mutex
 }
 
-func (p *fakeProcess) Stdout() io.Reader {
+func (p *fakeProcess) Stdout() io.ReadCloser {
 	if p.blockCh != nil {
-		return blockingReader{done: p.blockCh}
+		return blockingReadCloser{done: p.blockCh}
 	}
-	return bytes.NewBufferString(p.stdout)
+	return io.NopCloser(bytes.NewBufferString(p.stdout))
 }
 func (p *fakeProcess) Stderr() io.Reader   { return bytes.NewBufferString(p.stderr) }
 func (p *fakeProcess) Wait() processResult { return p.result }
@@ -75,12 +75,14 @@ func (p *fakeProcess) CancelCount() int {
 	return p.cancelCount
 }
 
-type blockingReader struct{ done <-chan struct{} }
+type blockingReadCloser struct{ done <-chan struct{} }
 
-func (r blockingReader) Read([]byte) (int, error) {
+func (r blockingReadCloser) Read([]byte) (int, error) {
 	<-r.done
 	return 0, io.EOF
 }
+
+func (r blockingReadCloser) Close() error { return nil }
 
 func TestStartRunBuildsStructuredCommand(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}

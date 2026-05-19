@@ -174,11 +174,10 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("start: %v", err)
 		}
-		time.Sleep(1500 * time.Millisecond)
+		events := []agentwrap.Event{waitForSmokeEvent(t, run, 5*time.Second)}
 		if err := run.Cancel(context.Background()); err != nil {
 			t.Fatalf("cancel: %v", err)
 		}
-		var events []agentwrap.Event
 		for event := range run.Events() {
 			events = append(events, event)
 		}
@@ -233,6 +232,22 @@ func runRealSmoke(t *testing.T, req agentwrap.RunRequest, options ...Option) ([]
 func startRealSmoke(t *testing.T, req agentwrap.RunRequest, options ...Option) (agentwrap.Run, error) {
 	t.Helper()
 	return NewRuntime(options...).StartRun(context.Background(), req)
+}
+
+func waitForSmokeEvent(t *testing.T, run agentwrap.Run, timeout time.Duration) agentwrap.Event {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case event, ok := <-run.Events():
+		if !ok {
+			t.Fatal("event stream closed before cancellation")
+		}
+		return event
+	case <-timer.C:
+		t.Fatal("timed out waiting for first event before cancellation")
+	}
+	return agentwrap.Event{}
 }
 
 func smokeModel(t *testing.T) string {

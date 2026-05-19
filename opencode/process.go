@@ -38,14 +38,14 @@ func (execProcessRunner) Start(ctx context.Context, spec processSpec) (process, 
 
 type execProcess struct {
 	cmd    *exec.Cmd
-	stdout io.Reader
+	stdout io.ReadCloser
 	stderr io.Reader
 	once   sync.Once
 	result processResult
 }
 
-func (p *execProcess) Stdout() io.Reader { return p.stdout }
-func (p *execProcess) Stderr() io.Reader { return p.stderr }
+func (p *execProcess) Stdout() io.ReadCloser { return p.stdout }
+func (p *execProcess) Stderr() io.Reader     { return p.stderr }
 
 func (p *execProcess) Wait() processResult {
 	p.once.Do(func() {

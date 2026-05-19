@@ -140,9 +140,9 @@ func (r *run) Wait(ctx context.Context) (agentwrap.RunResult, error) {
 }
 
 func (r *run) Cancel(ctx context.Context) error {
-	r.cancel()
 	r.emitLifecycle(agentwrap.StateCancelled, "caller_cancel")
 	cleanup := r.cleanup(ctx, "caller_cancel")
+	r.cancel()
 	if cleanup.Error != nil {
 		return cleanup.Error
 	}
@@ -156,6 +156,9 @@ func (r *run) captureStderr() {
 
 func (r *run) cancelOnContextDone() {
 	<-r.ctx.Done()
+	if r.currentLifecycle().Terminal() {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = r.cleanup(ctx, "context_done")
@@ -311,8 +314,9 @@ func (r *run) emitLifecycle(to agentwrap.LifecycleState, reason string) {
 	seq := r.nextSequence()
 	from := r.transitionLifecycle(to)
 	event := agentwrap.LifecycleEvent(r.id, r.req.SessionID, r.req.TurnID, r.context, seq, r.now(), from, to, reason)
-	r.recordEventStats(event)
-	_ = r.sendLocalEvent(event)
+	if r.sendLocalEvent(event) {
+		r.recordEventStats(event)
+	}
 }
 
 func (r *run) transitionLifecycle(to agentwrap.LifecycleState) agentwrap.LifecycleState {
@@ -323,11 +327,18 @@ func (r *run) transitionLifecycle(to agentwrap.LifecycleState) agentwrap.Lifecyc
 	return from
 }
 
+func (r *run) currentLifecycle() agentwrap.LifecycleState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lifecycle
+}
+
 func (r *run) emitSession() {
 	seq := r.nextSequence()
 	event := agentwrap.SessionEvent(r.id, r.req.SessionID, r.req.TurnID, r.context, seq, r.now(), sessionMetadata(r.req, r.sessionID))
-	r.recordEventStats(event)
-	_ = r.sendLocalEvent(event)
+	if r.sendLocalEvent(event) {
+		r.recordEventStats(event)
+	}
 }
 
 func (r *run) nextSequence() int64 {
