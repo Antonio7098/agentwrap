@@ -161,7 +161,7 @@ func (p BasicPolicy) Decide(ctx context.Context, policyCtx PolicyContext) (Polic
 	if policyCtx.Err.Category == ErrorRateLimit && !p.RetryRateLimits {
 		return p.fallbackOrStop(policyCtx, "rate limit retry disabled")
 	}
-	if policyCtx.Err.Category == ErrorRuntimeExit && p.hasFallback(policyCtx) {
+	if policyCtx.Err.Category == ErrorRuntimeExit && p.hasFallback(policyCtx) && p.shouldFallback(policyCtx) {
 		return p.fallbackOrStop(policyCtx, "runtime exit")
 	}
 	if p.shouldRetry(policyCtx) && p.canRetry(policyCtx) {
@@ -925,7 +925,7 @@ func safeErrDetail(err *SDKError) string {
 	if err.UserDetail != "" {
 		return err.UserDetail
 	}
-	return err.DebugDetail
+	return ""
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

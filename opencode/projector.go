@@ -31,18 +31,17 @@ type projectionResult struct {
 func projectNative(in projectionInput) projectionResult {
 	record := in.record
 	category, typ := classify(record)
-	payload := agentwrap.EventPayload{
-		"native_type": record.Type,
-		"line":        record.Line,
-		"turn_id":     string(in.turnID),
-		"context":     in.ctx,
-	}
+	payload := agentwrap.EventPayload{}
 	for k, v := range record.Data {
 		if k == "type" || k == "timestamp" {
 			continue
 		}
 		payload[k] = v
 	}
+	payload["native_type"] = record.Type
+	payload["line"] = record.Line
+	payload["turn_id"] = string(in.turnID)
+	payload["context"] = in.ctx
 	event := agentwrap.Event{
 		ID:        agentwrap.EventID(fmt.Sprintf("%s:%d", in.runID, in.seq)),
 		RunID:     in.runID,

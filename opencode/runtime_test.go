@@ -439,7 +439,6 @@ func TestCancelClassifiesRunAsCancelled(t *testing.T) {
 		t.Fatalf("err = %v result=%#v", err, result)
 	}
 	requireLifecycleTransition(t, events, agentwrap.StatusRunning, agentwrap.StatusCancelled, "caller_cancel")
-	requireLifecycleTransition(t, events, agentwrap.StatusCancelled, agentwrap.StatusCompleted, "caller_cancel")
 }
 
 func TestContextTimeoutClassifiesRunAsTimeout(t *testing.T) {
@@ -474,16 +473,16 @@ func TestBlockedStdoutTimeoutStaysTimeout(t *testing.T) {
 	}
 }
 
-func TestCleanupFailureDoesNotOverwritePrimarySuccess(t *testing.T) {
+func TestCleanupFailureFailsRun(t *testing.T) {
 	proc := &fakeProcess{stdout: readFixture(t, "normal.ndjson"), cancel: errors.New("cleanup failed")}
 	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: proc}))
 	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, result := drainRun(t, run)
-	if result.Status != agentwrap.StatusCompleted || result.Err != nil {
-		t.Fatalf("primary result changed: %#v", result)
+	_, result, err := drainRunErr(t, run)
+	if err == nil || result.Status != agentwrap.StatusFailed || result.Err == nil || result.Err.Category != agentwrap.ErrorCleanup {
+		t.Fatalf("cleanup failure result = err:%v result:%#v", err, result)
 	}
 	if !result.Metadata.Cleanup.Failed || result.Metadata.Cleanup.Error == nil || result.Metadata.Cleanup.Error.Category != agentwrap.ErrorCleanup {
 		t.Fatalf("cleanup metadata = %#v", result.Metadata.Cleanup)

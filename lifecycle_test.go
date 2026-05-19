@@ -9,11 +9,9 @@ func TestLifecycleTerminalStates(t *testing.T) {
 	}{
 		{state: StatusStarting},
 		{state: StatusRunning},
-		{state: StatusRunning},
 		{state: StatusCompleted, want: true},
 		{state: StatusFailed, want: true},
 		{state: StatusCancelled, want: true},
-		{state: StatusCompleted, want: true},
 	} {
 		t.Run(string(tc.state), func(t *testing.T) {
 			if got := tc.state.Terminal(); got != tc.want {

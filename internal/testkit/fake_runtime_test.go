@@ -168,6 +168,27 @@ func TestFakeRuntimeMalformedUnknownFailureAndCancellation(t *testing.T) {
 		}
 	})
 
+	t.Run("fatal event remains sticky after completed lifecycle", func(t *testing.T) {
+		runtime := &FakeRuntime{Script: []agentwrap.Event{
+			lifecycleEvent(agentwrap.StatusRunning),
+			{Type: "run.failed", Payload: agentwrap.EventPayloadWithKind(agentwrap.EventFatalError, nil)},
+			lifecycleEvent(agentwrap.StatusCompleted),
+		}}
+		run, err := runtime.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "fail then complete"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range run.Events() {
+		}
+		result, err := run.Wait(context.Background())
+		if err == nil {
+			t.Fatal("Wait returned nil error")
+		}
+		if result.Status != agentwrap.StatusFailed {
+			t.Fatalf("Status = %q, want %q", result.Status, agentwrap.StatusFailed)
+		}
+	})
+
 	t.Run("cancellation state", func(t *testing.T) {
 		runtime := &FakeRuntime{Script: []agentwrap.Event{
 			lifecycleEvent(agentwrap.StatusRunning),

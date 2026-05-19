@@ -245,6 +245,8 @@ func (r *run) run() {
 	cleanup := r.cleanup(cleanupCtx, "run_finished")
 	r.finished = r.now()
 	result, err := r.finalResult(decodeErr, processResult, cleanup)
+	r.emitLifecycle(result.Status, lifecycleReason(result.Status))
+	r.refreshResultEventStats(&result)
 	r.mu.Lock()
 	r.result = result
 	r.waitErr = err
@@ -317,6 +319,11 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	}
 	if cleanup.Error != nil {
 		metadata.Errors = append(metadata.Errors, *cleanup.Error)
+		if sdkErr == nil {
+			sdkErr = cleanup.Error
+			status = agentwrap.StatusFailed
+			metadata.Status = status
+		}
 	}
 	result := agentwrap.RunResult{
 		RunID:      r.id,
@@ -334,10 +341,17 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	if sdkErr != nil {
 		return result, sdkErr
 	}
-	if cleanup.Error != nil {
-		return result, nil
-	}
 	return result, nil
+}
+
+func (r *run) refreshResultEventStats(result *agentwrap.RunResult) {
+	if result.Metadata.NativeMetadata == nil {
+		result.Metadata.NativeMetadata = map[string]any{}
+	}
+	result.Metadata.NativeMetadata["event_count"] = r.seq
+	result.Metadata.NativeMetadata["event_categories"] = copyStringIntMap(r.categories)
+	result.Metadata.NativeMetadata["native_event_types"] = copyStringIntMap(r.nativeTypes)
+	result.Metadata.NativeMetadata["native_extension_count"] = r.categories[string(agentwrap.EventNativeExtension)]
 }
 
 func (r *run) cleanup(ctx context.Context, reason string) agentwrap.CleanupMetadata {
@@ -349,9 +363,21 @@ func (r *run) cleanup(ctx context.Context, reason string) agentwrap.CleanupMetad
 			r.emitLifecycle(agentwrap.StatusFailed, "cleanup_failed")
 			return
 		}
-		r.emitLifecycle(agentwrap.StatusCompleted, reason)
 	})
 	return r.cleanupResult
+}
+
+func lifecycleReason(status agentwrap.RunStatus) string {
+	switch status {
+	case agentwrap.StatusCompleted:
+		return "run_finished"
+	case agentwrap.StatusCancelled:
+		return "run_cancelled"
+	case agentwrap.StatusFailed:
+		return "run_failed"
+	default:
+		return string(status)
+	}
 }
 
 func (r *run) emitLifecycle(to agentwrap.RunStatus, reason string) {
@@ -369,10 +395,7 @@ func (r *run) transitionLifecycle(to agentwrap.RunStatus) (int64, agentwrap.RunS
 	r.eventMu.Lock()
 	defer r.eventMu.Unlock()
 	from := r.lifecycle
-	if from == to || from == agentwrap.StatusCompleted || from == agentwrap.StatusFailed {
-		return 0, from, false
-	}
-	if from == agentwrap.StatusCancelled && to != agentwrap.StatusCompleted && to != agentwrap.StatusFailed {
+	if from == to || from.Terminal() {
 		return 0, from, false
 	}
 	r.seq++

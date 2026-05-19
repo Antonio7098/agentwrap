@@ -107,8 +107,8 @@ func WithStatusCode(status int) ErrorOption {
 
 func WithResponse(headers map[string]string, body string) ErrorOption {
 	return func(err *SDKError) {
-		err.ResponseHeaders = cloneStringMap(headers)
-		err.ResponseBody = body
+		err.ResponseHeaders = RedactStringMap(headers)
+		err.ResponseBody = RedactString(body)
 	}
 }
 
@@ -151,6 +151,6 @@ func WithRetryAfter(delay time.Duration) ErrorOption {
 
 func WithMetadata(metadata map[string]string) ErrorOption {
 	return func(err *SDKError) {
-		err.Metadata = cloneStringMap(metadata)
+		err.Metadata = RedactStringMap(metadata)
 	}
 }

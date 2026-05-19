@@ -181,9 +181,11 @@ func (r *fakeRun) play(ctx context.Context) {
 		event.ID = agentwrap.EventID(fmt.Sprintf("fake-event-%d", i+1))
 		event.RunID = r.id
 		event.SessionID = r.sessionID
-		if event.Payload == nil {
-			event.Payload = agentwrap.EventPayload{}
+		payload := make(agentwrap.EventPayload, len(event.Payload)+2)
+		for k, v := range event.Payload {
+			payload[k] = v
 		}
+		event.Payload = payload
 		event.Payload["turn_id"] = string(r.turnID)
 		event.Payload["context"] = r.context
 		if event.Time.IsZero() {
@@ -211,12 +213,9 @@ func (r *fakeRun) play(ctx context.Context) {
 func (r *fakeRun) observe(event agentwrap.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if event.Kind() == agentwrap.EventLifecycle {
-		if state, ok := event.Payload["state"].(agentwrap.RunStatus); ok {
+	if event.Kind() == agentwrap.EventLifecycle && !r.status.Terminal() && r.err == nil {
+		if state, ok := coerceRunStatus(event.Payload["state"]); ok {
 			r.status = state
-		}
-		if state, ok := event.Payload["state"].(string); ok {
-			r.status = agentwrap.RunStatus(state)
 		}
 	}
 	if event.Kind() == agentwrap.EventArtifact {
@@ -232,6 +231,24 @@ func (r *fakeRun) observe(event agentwrap.Event) {
 	if event.Kind() == agentwrap.EventFatalError && r.err == nil {
 		r.status = agentwrap.StatusFailed
 		r.err = agentwrap.NewError(agentwrap.ErrorRuntimeExit, "fake.play", "fake fatal event", nil)
+	}
+}
+
+func coerceRunStatus(value any) (agentwrap.RunStatus, bool) {
+	var status agentwrap.RunStatus
+	switch v := value.(type) {
+	case agentwrap.RunStatus:
+		status = v
+	case string:
+		status = agentwrap.RunStatus(v)
+	default:
+		return "", false
+	}
+	switch status {
+	case agentwrap.StatusStarting, agentwrap.StatusRunning, agentwrap.StatusCompleted, agentwrap.StatusFailed, agentwrap.StatusCancelled:
+		return status, true
+	default:
+		return "", false
 	}
 }
 

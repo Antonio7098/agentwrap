@@ -90,6 +90,44 @@ func TestPolicyRunnerFallbackThenRetriesOnFallbackTarget(t *testing.T) {
 	}
 }
 
+func TestPolicyRunnerHonorsShouldFallbackBeforeRuntimeExitFallback(t *testing.T) {
+	primaryErr := NewError(ErrorRuntimeExit, "primary", "primary failed", nil)
+	primary := &scriptRuntime{name: "primary", results: []scriptResult{{err: primaryErr}, {}}}
+	fallback := &scriptRuntime{name: "fallback", results: []scriptResult{{}}}
+	runner := PolicyRunner{
+		Runtime: primary,
+		Alternatives: []FallbackAlternative{{
+			Name:    "fallback",
+			Runtime: fallback,
+		}},
+		Policy: BasicPolicy{
+			MaxAttemptsPerTarget: 2,
+			Backoff:              FixedBackoff{},
+			ShouldRetry:          func(PolicyContext) bool { return true },
+			ShouldFallback:       func(PolicyContext) bool { return false },
+		},
+		Sleep: noSleep,
+	}
+
+	run, err := runner.StartRun(context.Background(), RunRequest{})
+	if err != nil {
+		t.Fatalf("StartRun error: %v", err)
+	}
+	result, err := run.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait error: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Fatalf("status = %s, want completed", result.Status)
+	}
+	if primary.starts != 2 || fallback.starts != 0 {
+		t.Fatalf("starts primary=%d fallback=%d, want 2/0", primary.starts, fallback.starts)
+	}
+	if hasDecision(result.Metadata.Policy.Decisions, PolicyDecisionFallback) {
+		t.Fatalf("unexpected fallback decision: %#v", result.Metadata.Policy.Decisions)
+	}
+}
+
 func TestBasicPolicyDoesNotRetryUnknownByDefault(t *testing.T) {
 	unknown := NewError(ErrorUnknown, "fake", "unknown failure", nil)
 	runtime := &scriptRuntime{results: []scriptResult{{err: unknown}, {}}}

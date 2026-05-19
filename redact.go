@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-var secretNamePattern = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|authorization|credential|bearer)`)
+var secretNamePattern = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|authorization|credential|bearer|cookie|set-cookie|x-request-id|request[_-]?id)`)
 var bearerPattern = regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`)
-var assignmentSecretPattern = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|authorization|credential)=([^ \n\r\t]+)`)
+var assignmentSecretPattern = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|authorization|credential)=([^ \n\r\t,"'}]+)`)
 
 // RedactString removes common credential forms from diagnostic text.
 func RedactString(value string) string {

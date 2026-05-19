@@ -15,9 +15,10 @@ func TestSDKErrorFactsAndWrapping(t *testing.T) {
 		cause,
 		WithDebugDetail("http 429 from provider"),
 		WithStatusCode(429),
-		WithResponse(map[string]string{"retry-after": "3"}, `{"error":"limited"}`),
+		WithResponse(map[string]string{"retry-after": "3", "authorization": "Bearer secret"}, `{"error":"limited","token=secret"}`),
 		WithProviderModel("openai", "gpt"),
 		WithRetryAfter(3*time.Second),
+		WithMetadata(map[string]string{"x-request-id": "abc", "scope": "test"}),
 	)
 
 	if !errors.Is(err, cause) {
@@ -32,6 +33,12 @@ func TestSDKErrorFactsAndWrapping(t *testing.T) {
 	}
 	if got.ResponseHeaders["retry-after"] != "3" || got.ResponseBody == "" {
 		t.Fatalf("response facts missing: %#v", got)
+	}
+	if got.ResponseHeaders["authorization"] != "[REDACTED]" || got.Metadata["x-request-id"] != "[REDACTED]" {
+		t.Fatalf("sensitive response facts were not redacted: %#v", got)
+	}
+	if got.ResponseBody != `{"error":"limited","token=[REDACTED]"}` {
+		t.Fatalf("ResponseBody = %q", got.ResponseBody)
 	}
 	if got.Provider != "openai" || got.Model != "gpt" || got.RetryAfter != 3*time.Second {
 		t.Fatalf("provider/model/retry-after facts missing: %#v", got)

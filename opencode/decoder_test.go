@@ -120,6 +120,32 @@ func TestProjectNativeEvents(t *testing.T) {
 	}
 }
 
+func TestProjectNativePreservesSDKPayloadMetadata(t *testing.T) {
+	record, err := decodeNativeLine([]byte(`{"type":"text","native_type":"bad","line":999,"turn_id":"bad","context":"bad"}`), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected := projectNative(projectionInput{
+		runID:  "run_1",
+		turnID: "turn_1",
+		ctx:    agentwrap.RuntimeContext{RuntimeKind: "opencode"},
+		seq:    1,
+		record: record,
+	})
+	if projected.event.Payload["native_type"] != "text" {
+		t.Fatalf("native_type = %#v", projected.event.Payload["native_type"])
+	}
+	if projected.event.Payload["line"] != int64(1) {
+		t.Fatalf("line = %#v", projected.event.Payload["line"])
+	}
+	if projected.event.Payload["turn_id"] != "turn_1" {
+		t.Fatalf("turn_id = %#v", projected.event.Payload["turn_id"])
+	}
+	if projected.event.Payload["context"] != (agentwrap.RuntimeContext{RuntimeKind: "opencode"}) {
+		t.Fatalf("context = %#v", projected.event.Payload["context"])
+	}
+}
+
 func TestScanFixtureMalformed(t *testing.T) {
 	data, err := os.ReadFile("testdata/malformed.ndjson")
 	if err != nil {
