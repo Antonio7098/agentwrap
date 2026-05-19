@@ -45,13 +45,14 @@ type fakeProcess struct {
 	cancel      error
 	cancelCount int
 	blockCh     chan struct{}
+	closeOnce   sync.Once
 	once        sync.Once
 	mu          sync.Mutex
 }
 
 func (p *fakeProcess) Stdout() io.ReadCloser {
 	if p.blockCh != nil {
-		return blockingReadCloser{done: p.blockCh}
+		return blockingReadCloser{done: p.blockCh, close: &p.closeOnce}
 	}
 	return io.NopCloser(bytes.NewBufferString(p.stdout))
 }
@@ -63,7 +64,7 @@ func (p *fakeProcess) Cancel(context.Context) cleanupResult {
 	p.mu.Unlock()
 	p.once.Do(func() {
 		if p.blockCh != nil {
-			close(p.blockCh)
+			p.closeOnce.Do(func() { close(p.blockCh) })
 		}
 	})
 	return cleanupResult{GracefulAttempted: true, Err: p.cancel}
@@ -75,14 +76,20 @@ func (p *fakeProcess) CancelCount() int {
 	return p.cancelCount
 }
 
-type blockingReadCloser struct{ done <-chan struct{} }
+type blockingReadCloser struct {
+	done  chan struct{}
+	close *sync.Once
+}
 
 func (r blockingReadCloser) Read([]byte) (int, error) {
 	<-r.done
 	return 0, io.EOF
 }
 
-func (r blockingReadCloser) Close() error { return nil }
+func (r blockingReadCloser) Close() error {
+	r.close.Do(func() { close(r.done) })
+	return nil
+}
 
 func TestStartRunBuildsStructuredCommand(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}

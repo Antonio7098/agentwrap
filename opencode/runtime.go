@@ -57,7 +57,6 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 		lifecycle:    agentwrap.StateInitialized,
 	}
 	handle.emitLifecycle(agentwrap.StateRunning, "process_started")
-	handle.emitSession()
 	go handle.captureStderr()
 	go handle.cancelOnContextDone()
 	go handle.run()
@@ -170,6 +169,9 @@ func (r *run) run() {
 	defer r.cancel()
 
 	decodeErr := scanNativeRecords(r.ctx, r.proc.Stdout(), func(record nativeRecord) error {
+		if r.updateSessionID(observedSessionID(record)) {
+			r.emitSession()
+		}
 		seq := r.nextSequence()
 		projected := projectNative(projectionInput{
 			runID:  r.id,
@@ -181,9 +183,6 @@ func (r *run) run() {
 		})
 		if projected.event.SessionID == "" {
 			projected.event.SessionID = r.req.SessionID
-		}
-		if projected.event.SessionID != "" {
-			r.sessionID = projected.event.SessionID
 		}
 		r.recordEventStats(projected.event)
 		if !r.sendEvent(projected.event) {
@@ -299,43 +298,54 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 
 func (r *run) cleanup(ctx context.Context, reason string) agentwrap.CleanupMetadata {
 	r.cleanupOnce.Do(func() {
-		r.emitLifecycle(agentwrap.StateCleanedUp, reason)
 		procCleanup := r.proc.Cancel(ctx)
 		r.cleanupResult = agentwrap.CleanupMetadata{Attempted: true, Completed: procCleanup.Err == nil, Failed: procCleanup.Err != nil}
 		if procCleanup.Err != nil {
 			r.cleanupResult.Error = agentwrap.NewError(agentwrap.ErrorCleanup, "opencode cleanup", "OpenCode cleanup failed", procCleanup.Err, agentwrap.WithDebugDetail(procCleanup.Err.Error()))
 			r.emitLifecycle(agentwrap.StateFailed, "cleanup_failed")
+			return
 		}
+		r.emitLifecycle(agentwrap.StateCleanedUp, reason)
 	})
 	return r.cleanupResult
 }
 
 func (r *run) emitLifecycle(to agentwrap.LifecycleState, reason string) {
-	seq := r.nextSequence()
-	from := r.transitionLifecycle(to)
+	seq, from, ok := r.transitionLifecycle(to)
+	if !ok {
+		return
+	}
 	event := agentwrap.LifecycleEvent(r.id, r.req.SessionID, r.req.TurnID, r.context, seq, r.now(), from, to, reason)
 	if r.sendLocalEvent(event) {
 		r.recordEventStats(event)
 	}
 }
 
-func (r *run) transitionLifecycle(to agentwrap.LifecycleState) agentwrap.LifecycleState {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (r *run) transitionLifecycle(to agentwrap.LifecycleState) (int64, agentwrap.LifecycleState, bool) {
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
 	from := r.lifecycle
+	if from == to || from == agentwrap.StateCleanedUp || from == agentwrap.StateFailed {
+		return 0, from, false
+	}
+	if from == agentwrap.StateCancelled && to != agentwrap.StateCleanedUp && to != agentwrap.StateFailed {
+		return 0, from, false
+	}
+	r.seq++
 	r.lifecycle = to
-	return from
+	return r.seq, from, true
 }
 
 func (r *run) currentLifecycle() agentwrap.LifecycleState {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
 	return r.lifecycle
 }
 
 func (r *run) emitSession() {
 	seq := r.nextSequence()
-	event := agentwrap.SessionEvent(r.id, r.req.SessionID, r.req.TurnID, r.context, seq, r.now(), sessionMetadata(r.req, r.sessionID))
+	sessionID := firstSessionID(r.sessionID, r.req.SessionID)
+	event := agentwrap.SessionEvent(r.id, sessionID, r.req.TurnID, r.context, seq, r.now(), sessionMetadata(r.req, r.sessionID))
 	if r.sendLocalEvent(event) {
 		r.recordEventStats(event)
 	}
@@ -346,6 +356,24 @@ func (r *run) nextSequence() int64 {
 	defer r.eventMu.Unlock()
 	r.seq++
 	return r.seq
+}
+
+func (r *run) updateSessionID(sessionID agentwrap.SessionID) bool {
+	r.eventMu.Lock()
+	defer r.eventMu.Unlock()
+	if sessionID == "" || r.sessionID == sessionID {
+		return false
+	}
+	r.sessionID = sessionID
+	return true
+}
+
+func observedSessionID(record nativeRecord) agentwrap.SessionID {
+	return firstSessionID(
+		agentwrap.SessionID(record.SessionID),
+		agentwrap.SessionID(stringValue(record.Data["sessionID"])),
+		agentwrap.SessionID(stringValue(record.Data["session_id"])),
+	)
 }
 
 func (r *run) sendEvent(event agentwrap.Event) bool {

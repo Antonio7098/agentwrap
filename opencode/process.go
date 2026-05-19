@@ -70,8 +70,13 @@ func (p *execProcess) Cancel(ctx context.Context) cleanupResult {
 		return cleanupResult{}
 	}
 	result := cleanupResult{GracefulAttempted: true}
+	if p.cmd.ProcessState != nil && p.cmd.ProcessState.Exited() {
+		return result
+	}
 	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		result.Err = err
+	} else if errors.Is(err, os.ErrProcessDone) {
+		return result
 	}
 	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()
