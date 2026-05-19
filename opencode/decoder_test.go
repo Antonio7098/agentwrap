@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -123,7 +124,7 @@ func TestScanFixtureMalformed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = scanNativeRecords(strings.NewReader(string(data)), func(nativeRecord) error { return nil })
+	err = scanNativeRecords(context.Background(), strings.NewReader(string(data)), func(nativeRecord) error { return nil })
 	var d *decodeError
 	if !errors.As(err, &d) {
 		t.Fatalf("expected decodeError, got %T %v", err, err)
@@ -134,12 +135,21 @@ func TestScanFixtureMalformed(t *testing.T) {
 }
 
 func TestScanBlankLineIsMalformed(t *testing.T) {
-	err := scanNativeRecords(strings.NewReader("{\"type\":\"step_start\"}\n\n{\"type\":\"step_finish\"}\n"), func(nativeRecord) error { return nil })
+	err := scanNativeRecords(context.Background(), strings.NewReader("{\"type\":\"step_start\"}\n\n{\"type\":\"step_finish\"}\n"), func(nativeRecord) error { return nil })
 	var d *decodeError
 	if !errors.As(err, &d) {
 		t.Fatalf("expected decodeError, got %T %v", err, err)
 	}
 	if d.line != 2 {
 		t.Fatalf("line = %d, want 2", d.line)
+	}
+}
+
+func TestScanRespectsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := scanNativeRecords(ctx, strings.NewReader(""), func(nativeRecord) error { return nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %T %v, want context.Canceled", err, err)
 	}
 }

@@ -54,7 +54,10 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 		now:          r.now,
 		stderrBuffer: newLimitBuffer(r.stderrLimit),
 		stderrDone:   make(chan struct{}),
+		lifecycle:    agentwrap.StateInitialized,
 	}
+	handle.emitLifecycle(agentwrap.StateRunning, "process_started")
+	handle.emitSession()
 	go handle.captureStderr()
 	go handle.cancelOnContextDone()
 	go handle.run()
@@ -103,6 +106,7 @@ type run struct {
 	waitErr       error
 	cleanupOnce   sync.Once
 	cleanupResult agentwrap.CleanupMetadata
+	lifecycle     agentwrap.LifecycleState
 	started       time.Time
 	finished      time.Time
 
@@ -137,7 +141,7 @@ func (r *run) Wait(ctx context.Context) (agentwrap.RunResult, error) {
 
 func (r *run) Cancel(ctx context.Context) error {
 	r.cancel()
-	r.emitLifecycle(agentwrap.StateRunning, agentwrap.StateCancelled, "caller_cancel")
+	r.emitLifecycle(agentwrap.StateCancelled, "caller_cancel")
 	cleanup := r.cleanup(ctx, "caller_cancel")
 	if cleanup.Error != nil {
 		return cleanup.Error
@@ -162,9 +166,7 @@ func (r *run) run() {
 	defer close(r.done)
 	defer r.cancel()
 
-	r.emitLifecycle(agentwrap.StateInitialized, agentwrap.StateRunning, "process_started")
-	r.emitSession()
-	decodeErr := scanNativeRecords(r.proc.Stdout(), func(record nativeRecord) error {
+	decodeErr := scanNativeRecords(r.ctx, r.proc.Stdout(), func(record nativeRecord) error {
 		seq := r.nextSequence()
 		projected := projectNative(projectionInput{
 			runID:  r.id,
@@ -214,13 +216,22 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	status := agentwrap.StateCompleted
 	var sdkErr *agentwrap.SDKError
 	if decodeErr != nil {
-		var already *agentwrap.SDKError
-		if errors.As(decodeErr, &already) {
-			sdkErr = already
+		if errors.Is(decodeErr, context.Canceled) || errors.Is(decodeErr, context.DeadlineExceeded) {
+			sdkErr = classifyContextError(decodeErr, "opencode run")
+			if sdkErr.Category == agentwrap.ErrorCancellation {
+				status = agentwrap.StateCancelled
+			} else {
+				status = agentwrap.StateFailed
+			}
 		} else {
-			sdkErr = classifyDecodeError(decodeErr)
+			var already *agentwrap.SDKError
+			if errors.As(decodeErr, &already) {
+				sdkErr = already
+			} else {
+				sdkErr = classifyDecodeError(decodeErr)
+			}
+			status = agentwrap.StateFailed
 		}
-		status = agentwrap.StateFailed
 	} else if err := r.ctx.Err(); err != nil {
 		sdkErr = classifyContextError(err, "opencode run")
 		if sdkErr.Category == agentwrap.ErrorCancellation {
@@ -285,29 +296,38 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 
 func (r *run) cleanup(ctx context.Context, reason string) agentwrap.CleanupMetadata {
 	r.cleanupOnce.Do(func() {
-		r.emitLifecycle(agentwrap.StateRunning, agentwrap.StateCleanedUp, reason)
+		r.emitLifecycle(agentwrap.StateCleanedUp, reason)
 		procCleanup := r.proc.Cancel(ctx)
 		r.cleanupResult = agentwrap.CleanupMetadata{Attempted: true, Completed: procCleanup.Err == nil, Failed: procCleanup.Err != nil}
 		if procCleanup.Err != nil {
 			r.cleanupResult.Error = agentwrap.NewError(agentwrap.ErrorCleanup, "opencode cleanup", "OpenCode cleanup failed", procCleanup.Err, agentwrap.WithDebugDetail(procCleanup.Err.Error()))
-			r.emitLifecycle(agentwrap.StateRunning, agentwrap.StateFailed, "cleanup_failed")
+			r.emitLifecycle(agentwrap.StateFailed, "cleanup_failed")
 		}
 	})
 	return r.cleanupResult
 }
 
-func (r *run) emitLifecycle(from, to agentwrap.LifecycleState, reason string) {
+func (r *run) emitLifecycle(to agentwrap.LifecycleState, reason string) {
 	seq := r.nextSequence()
+	from := r.transitionLifecycle(to)
 	event := agentwrap.LifecycleEvent(r.id, r.req.SessionID, r.req.TurnID, r.context, seq, r.now(), from, to, reason)
 	r.recordEventStats(event)
-	_ = r.sendEvent(event)
+	_ = r.sendLocalEvent(event)
+}
+
+func (r *run) transitionLifecycle(to agentwrap.LifecycleState) agentwrap.LifecycleState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	from := r.lifecycle
+	r.lifecycle = to
+	return from
 }
 
 func (r *run) emitSession() {
 	seq := r.nextSequence()
 	event := agentwrap.SessionEvent(r.id, r.req.SessionID, r.req.TurnID, r.context, seq, r.now(), sessionMetadata(r.req, r.sessionID))
 	r.recordEventStats(event)
-	_ = r.sendEvent(event)
+	_ = r.sendLocalEvent(event)
 }
 
 func (r *run) nextSequence() int64 {
@@ -326,6 +346,18 @@ func (r *run) sendEvent(event agentwrap.Event) bool {
 		return false
 	case r.events <- event:
 		return true
+	}
+}
+
+func (r *run) sendLocalEvent(event agentwrap.Event) bool {
+	defer func() {
+		_ = recover()
+	}()
+	select {
+	case r.events <- event:
+		return true
+	default:
+		return false
 	}
 }
 

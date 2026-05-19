@@ -73,7 +73,7 @@ func (p *execProcess) Cancel(ctx context.Context) cleanupResult {
 	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		result.Err = err
 	}
-	timer := time.NewTimer(250 * time.Millisecond)
+	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():

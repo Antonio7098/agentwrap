@@ -272,10 +272,12 @@ func TestCancelClassifiesRunAsCancelled(t *testing.T) {
 	if err := run.Cancel(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	_, result, err := drainRunErr(t, run)
+	events, result, err := drainRunErr(t, run)
 	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorCancellation || result.Status != agentwrap.StateCancelled {
 		t.Fatalf("err = %v result=%#v", err, result)
 	}
+	requireLifecycleTransition(t, events, agentwrap.StateRunning, agentwrap.StateCancelled, "caller_cancel")
+	requireLifecycleTransition(t, events, agentwrap.StateCancelled, agentwrap.StateCleanedUp, "caller_cancel")
 }
 
 func TestContextTimeoutClassifiesRunAsTimeout(t *testing.T) {
@@ -288,6 +290,25 @@ func TestContextTimeoutClassifiesRunAsTimeout(t *testing.T) {
 	_, result, err := drainRunErr(t, run)
 	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorTimeout {
 		t.Fatalf("err = %v result=%#v", err, result)
+	}
+}
+
+func TestBlockedStdoutTimeoutStaysTimeout(t *testing.T) {
+	proc := &fakeProcess{blockCh: make(chan struct{})}
+	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: proc}))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello", Timeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil {
+		t.Fatalf("expected timeout result, got nil err result=%#v", result)
+	}
+	if result.Err == nil || result.Err.Category != agentwrap.ErrorTimeout {
+		t.Fatalf("result err = %#v", result.Err)
+	}
+	if result.Status != agentwrap.StateFailed {
+		t.Fatalf("status = %s", result.Status)
 	}
 }
 
@@ -520,4 +541,17 @@ func intMapValue(value any) map[string]int {
 		}
 	}
 	return out
+}
+
+func requireLifecycleTransition(t *testing.T, events []agentwrap.Event, from, to agentwrap.LifecycleState, reason string) {
+	t.Helper()
+	for _, event := range events {
+		if event.Category != agentwrap.EventLifecycle {
+			continue
+		}
+		if event.Payload["from"] == string(from) && event.Payload["to"] == string(to) && event.Payload["reason"] == reason {
+			return
+		}
+	}
+	t.Fatalf("missing lifecycle transition %s -> %s reason=%s in %#v", from, to, reason, events)
 }
