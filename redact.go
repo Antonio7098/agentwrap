@@ -27,14 +27,40 @@ func RedactMetadata(metadata map[string]any) map[string]any {
 			out[key] = "[REDACTED]"
 			continue
 		}
-		switch v := value.(type) {
-		case string:
-			out[key] = RedactString(v)
-		case map[string]any:
-			out[key] = RedactMetadata(v)
-		default:
-			out[key] = value
+		out[key] = redactMetadataValue(value)
+	}
+	return out
+}
+
+func redactMetadataValue(value any) any {
+	switch v := value.(type) {
+	case string:
+		return RedactString(v)
+	case map[string]any:
+		return RedactMetadata(v)
+	case []any:
+		out := make([]any, len(v))
+		for i := range v {
+			out[i] = redactMetadataValue(v[i])
 		}
+		return out
+	default:
+		return value
+	}
+}
+
+// RedactStringMap redacts secret-looking string map keys and values.
+func RedactStringMap(metadata map[string]string) map[string]string {
+	if metadata == nil {
+		return nil
+	}
+	out := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		if secretNamePattern.MatchString(key) {
+			out[key] = "[REDACTED]"
+			continue
+		}
+		out[key] = RedactString(value)
 	}
 	return out
 }

@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/antonioborgerees/agentwrap"
@@ -19,6 +20,11 @@ func TestCheckHealthUsesFakeProbesAndRedactsSecrets(t *testing.T) {
 	report, err := rt.CheckHealth(context.Background(), agentwrap.HealthCheckRequest{
 		Provider: "anthropic",
 		Model:    "claude-sonnet",
+		WorkDir:  "/tmp/agentwrap-health-workdir",
+		Metadata: map[string]string{
+			"api_key": "raw-secret",
+			"note":    "Bearer metadata-token",
+		},
 		Checks: []agentwrap.HealthCheckID{
 			agentwrap.HealthCheckRuntimeAvailable,
 			agentwrap.HealthCheckStructuredOutput,
@@ -40,6 +46,29 @@ func TestCheckHealthUsesFakeProbesAndRedactsSecrets(t *testing.T) {
 	}
 	if env := report.NativeMetadata["env"].(string); contains(env, "secret") {
 		t.Fatalf("secret leaked in env metadata: %q", env)
+	}
+	if got := report.EffectiveConfig.Metadata["api_key"].Value; got != "[REDACTED]" {
+		t.Fatalf("api key metadata = %q", got)
+	}
+	if contains(report.EffectiveConfig.Metadata["note"].Value, "metadata-token") {
+		t.Fatalf("metadata secret leaked: %#v", report.EffectiveConfig.Metadata["note"])
+	}
+	if runner.spec.WorkDir != "/tmp/agentwrap-health-workdir" {
+		t.Fatalf("probe workdir = %q", runner.spec.WorkDir)
+	}
+}
+
+func TestCheckHealthDetectsStructuredOutputBeyondDiagnosticSample(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: strings.Repeat("x", 128) + " --format json\n"}}
+	rt := NewRuntime(withProcessRunner(runner), WithStderrLimit(16))
+	report, err := rt.CheckHealth(context.Background(), agentwrap.HealthCheckRequest{
+		Checks: []agentwrap.HealthCheckID{agentwrap.HealthCheckStructuredOutput},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Results[0].Status != agentwrap.HealthReady {
+		t.Fatalf("status = %s result=%#v", report.Results[0].Status, report.Results[0])
 	}
 }
 
@@ -63,7 +92,7 @@ func TestStartRunRequiredPreflightBlocksProcessStart(t *testing.T) {
 }
 
 func TestCheckHealthReportsUnknownAuthenticationWhenUnproven(t *testing.T) {
-	runner := &fakeRunner{proc: &fakeProcess{stdout: "anthropic\n"}}
+	runner := &fakeRunner{proc: &fakeProcess{stdout: "openai authenticated\nanthropic\n"}}
 	rt := NewRuntime(withProcessRunner(runner))
 	report, err := rt.CheckHealth(context.Background(), agentwrap.HealthCheckRequest{
 		Provider: "anthropic",

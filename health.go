@@ -119,6 +119,7 @@ func OverallHealthStatus(results []HealthResult) HealthStatus {
 // RequiredHealthFailure returns a classified failure when a required check has
 // an unrecoverable, transient, degraded, unknown, or unsupported result.
 func RequiredHealthFailure(report HealthReport, required []HealthCheckID) *SDKError {
+	explicitRequired := len(required) > 0
 	requiredSet := make(map[HealthCheckID]bool, len(required))
 	for _, check := range required {
 		requiredSet[check] = true
@@ -128,10 +129,12 @@ func RequiredHealthFailure(report HealthReport, required []HealthCheckID) *SDKEr
 			requiredSet[check.Check] = true
 		}
 	}
+	seen := make(map[HealthCheckID]bool, len(requiredSet))
 	for _, result := range report.Results {
 		if !requiredSet[result.Check] {
 			continue
 		}
+		seen[result.Check] = true
 		switch result.Status {
 		case HealthReady, HealthSkipped:
 			continue
@@ -150,6 +153,13 @@ func RequiredHealthFailure(report HealthReport, required []HealthCheckID) *SDKEr
 				return result.Err
 			}
 			return NewError(ErrorHealth, "health preflight", "required health check failed", nil, WithDebugDetail(string(result.Check)))
+		}
+	}
+	if explicitRequired {
+		for check := range requiredSet {
+			if !seen[check] {
+				return NewError(ErrorHealth, "health preflight", "required health check is missing", nil, WithDebugDetail(string(check)), WithUserActionable(true), WithUnrecoverable(true))
+			}
 		}
 	}
 	return nil

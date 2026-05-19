@@ -29,6 +29,10 @@ func TestRequiredHealthFailureOnlyBlocksRequiredChecks(t *testing.T) {
 	if err == nil || err.Category != ErrorHealth {
 		t.Fatalf("err = %#v, want health failure", err)
 	}
+	err = RequiredHealthFailure(report, []HealthCheckID{HealthCheckModel})
+	if err == nil || err.Category != ErrorHealth || !err.Unrecoverable {
+		t.Fatalf("err = %#v, want missing required health failure", err)
+	}
 }
 
 func TestErrorForHealthStatusClassifiesUnrecoverable(t *testing.T) {

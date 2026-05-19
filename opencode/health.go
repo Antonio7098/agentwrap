@@ -73,15 +73,15 @@ func (r *Runtime) CheckHealth(ctx context.Context, req agentwrap.HealthCheckRequ
 func (r *Runtime) runHealthCheck(ctx context.Context, req agentwrap.HealthCheckRequest, check agentwrap.HealthCheckID) agentwrap.HealthResult {
 	switch check {
 	case agentwrap.HealthCheckRuntimeAvailable:
-		return r.probeCommand(ctx, check, []string{"--version"}, agentwrap.ErrorRuntimeUnavailable, "OpenCode executable is available")
+		return r.probeCommand(ctx, check, req.WorkDir, []string{"--version"}, nil, agentwrap.ErrorRuntimeUnavailable, "OpenCode executable is available")
 	case agentwrap.HealthCheckStructuredOutput:
-		result := r.probeCommand(ctx, check, []string{"run", "--help"}, agentwrap.ErrorHealth, "OpenCode run help is available")
+		result := r.probeCommand(ctx, check, req.WorkDir, []string{"run", "--help"}, []string{"--format", "json"}, agentwrap.ErrorHealth, "OpenCode run help is available")
 		if result.Status != agentwrap.HealthReady {
 			return result
 		}
-		text := fmt.Sprint(result.NativeMetadata["stdout"]) + "\n" + fmt.Sprint(result.NativeMetadata["stderr"])
-		if !strings.Contains(text, "--format") || !strings.Contains(text, "json") {
-			err := agentwrap.ErrorForHealthStatus(check, agentwrap.HealthUnrecoverable, agentwrap.ErrorHealth, "OpenCode structured JSON output support was not detected", text, nil)
+		if !probeMatched(result, "--format") || !probeMatched(result, "json") {
+			detail := fmt.Sprint(result.NativeMetadata["stdout"]) + "\n" + fmt.Sprint(result.NativeMetadata["stderr"])
+			err := agentwrap.ErrorForHealthStatus(check, agentwrap.HealthUnrecoverable, agentwrap.ErrorHealth, "OpenCode structured JSON output support was not detected", detail, nil)
 			return healthResult(r.now, check, agentwrap.HealthUnrecoverable, agentwrap.HealthSeverityError, err.UserDetail, err.DebugDetail, result.NativeMetadata, err)
 		}
 		return result
@@ -99,24 +99,35 @@ func (r *Runtime) runHealthCheck(ctx context.Context, req agentwrap.HealthCheckR
 		}
 		return healthResult(r.now, check, agentwrap.HealthReady, agentwrap.HealthSeverityInfo, "working directory is valid", "", nil, nil)
 	case agentwrap.HealthCheckConfig:
-		return r.probeCommand(ctx, check, []string{"debug", "config"}, agentwrap.ErrorHealth, "OpenCode configuration probe completed")
+		return r.probeCommand(ctx, check, req.WorkDir, []string{"debug", "config"}, nil, agentwrap.ErrorHealth, "OpenCode configuration probe completed")
 	case agentwrap.HealthCheckRuntimePaths:
-		return r.probeCommand(ctx, check, []string{"debug", "paths"}, agentwrap.ErrorHealth, "OpenCode paths probe completed")
+		return r.probeCommand(ctx, check, req.WorkDir, []string{"debug", "paths"}, nil, agentwrap.ErrorHealth, "OpenCode paths probe completed")
 	case agentwrap.HealthCheckProvider, agentwrap.HealthCheckAuthentication:
 		if req.Provider == "" {
 			return healthResult(r.now, check, agentwrap.HealthSkipped, agentwrap.HealthSeverityInfo, "no provider was requested", "", nil, nil)
 		}
-		result := r.probeCommand(ctx, check, []string{"providers", "list"}, agentwrap.ErrorProviderUnavailable, "OpenCode provider probe completed")
+		provider := strings.ToLower(string(req.Provider))
+		result := r.probeCommand(ctx, check, req.WorkDir, []string{"providers", "list"}, []string{provider}, agentwrap.ErrorProviderUnavailable, "OpenCode provider probe completed")
 		if result.Status != agentwrap.HealthReady {
 			return result
 		}
 		output := strings.ToLower(fmt.Sprint(result.NativeMetadata["stdout"]))
-		provider := strings.ToLower(string(req.Provider))
-		if !strings.Contains(output, provider) {
+		providerLine := ""
+		for _, line := range strings.Split(output, "\n") {
+			if strings.Contains(line, provider) {
+				providerLine = line
+				break
+			}
+		}
+		if providerLine == "" && !probeMatched(result, provider) {
 			err := agentwrap.ErrorForHealthStatus(check, agentwrap.HealthUnrecoverable, agentwrap.ErrorProviderUnavailable, "requested provider was not found", provider, nil)
 			return healthResult(r.now, check, agentwrap.HealthUnrecoverable, agentwrap.HealthSeverityError, err.UserDetail, err.DebugDetail, result.NativeMetadata, err)
 		}
-		if check == agentwrap.HealthCheckAuthentication && !strings.Contains(output, "auth") && !strings.Contains(output, "login") && !strings.Contains(output, "key") {
+		if check == agentwrap.HealthCheckAuthentication &&
+			(providerLine == "" ||
+				(!strings.Contains(providerLine, "auth") &&
+					!strings.Contains(providerLine, "login") &&
+					!strings.Contains(providerLine, "key"))) {
 			return healthResult(r.now, check, agentwrap.HealthUnknown, agentwrap.HealthSeverityWarn, "provider authentication readiness could not be proven without starting work", "", result.NativeMetadata, nil)
 		}
 		return result
@@ -128,13 +139,13 @@ func (r *Runtime) runHealthCheck(ctx context.Context, req agentwrap.HealthCheckR
 		if req.IncludeRefresh {
 			args = append(args, "--refresh")
 		}
-		result := r.probeCommand(ctx, check, args, agentwrap.ErrorModelUnavailable, "OpenCode model probe completed")
+		model := strings.ToLower(string(req.Model))
+		result := r.probeCommand(ctx, check, req.WorkDir, args, []string{model}, agentwrap.ErrorModelUnavailable, "OpenCode model probe completed")
 		if result.Status != agentwrap.HealthReady {
 			return result
 		}
 		output := strings.ToLower(fmt.Sprint(result.NativeMetadata["stdout"]))
-		model := strings.ToLower(string(req.Model))
-		if !strings.Contains(output, model) {
+		if !strings.Contains(output, model) && !probeMatched(result, model) {
 			err := agentwrap.ErrorForHealthStatus(check, agentwrap.HealthUnrecoverable, agentwrap.ErrorModelUnavailable, "requested model was not found", model, nil)
 			return healthResult(r.now, check, agentwrap.HealthUnrecoverable, agentwrap.HealthSeverityError, err.UserDetail, err.DebugDetail, result.NativeMetadata, err)
 		}
@@ -145,47 +156,114 @@ func (r *Runtime) runHealthCheck(ctx context.Context, req agentwrap.HealthCheckR
 	}
 }
 
-func (r *Runtime) probeCommand(ctx context.Context, check agentwrap.HealthCheckID, args []string, category agentwrap.ErrorCategory, readyDetail string) agentwrap.HealthResult {
+func (r *Runtime) probeCommand(ctx context.Context, check agentwrap.HealthCheckID, workDir string, args []string, needles []string, category agentwrap.ErrorCategory, readyDetail string) agentwrap.HealthResult {
 	started := r.now()
-	proc, err := r.runner.Start(ctx, processSpec{Executable: r.executable, Args: args, Env: r.env})
+	proc, err := r.runner.Start(ctx, processSpec{Executable: r.executable, Args: args, Env: r.env, WorkDir: workDir})
 	if err != nil {
 		sdkErr := agentwrap.ErrorForHealthStatus(check, agentwrap.HealthUnrecoverable, category, "OpenCode probe could not start", err.Error(), err)
 		return agentwrap.HealthResult{Check: check, Status: agentwrap.HealthUnrecoverable, Severity: agentwrap.HealthSeverityError, UserDetail: sdkErr.UserDetail, DebugDetail: sdkErr.DebugDetail, Err: sdkErr, StartedAt: started, FinishedAt: r.now()}
 	}
-	stdoutCh := make(chan string, 1)
-	stderrCh := make(chan string, 1)
+	stdoutCh := make(chan probeOutput, 1)
+	stderrCh := make(chan probeOutput, 1)
 	go func() {
-		stdoutCh <- readProbeOutput(proc.Stdout(), r.stderrLimit)
+		stdoutCh <- readProbeOutput(proc.Stdout(), r.stderrLimit, needles)
 	}()
 	go func() {
-		stderrCh <- readProbeOutput(io.NopCloser(proc.Stderr()), r.stderrLimit)
+		stderrCh <- readProbeOutput(io.NopCloser(proc.Stderr()), r.stderrLimit, needles)
 	}()
 	result := proc.Wait()
 	stdout := <-stdoutCh
 	stderr := <-stderrCh
+	matches := mergeProbeMatches(stdout.Matches, stderr.Matches)
 	native := map[string]any{
 		"args":      append([]string(nil), args...),
-		"stdout":    agentwrap.RedactString(stdout),
-		"stderr":    agentwrap.RedactString(stderr),
+		"workdir":   workDir,
+		"stdout":    agentwrap.RedactString(stdout.Sample),
+		"stderr":    agentwrap.RedactString(stderr.Sample),
+		"matches":   matches,
 		"exit_code": result.ExitCode,
 	}
 	if result.Err != nil || result.ExitCode != 0 {
-		detail := fmt.Sprintf("exit_code=%d stderr=%s", result.ExitCode, agentwrap.RedactString(stderr))
+		detail := fmt.Sprintf("exit_code=%d stderr=%s", result.ExitCode, agentwrap.RedactString(stderr.Sample))
 		sdkErr := agentwrap.ErrorForHealthStatus(check, agentwrap.HealthTransientFail, category, "OpenCode probe failed", detail, result.Err)
 		return healthResult(r.now, check, agentwrap.HealthTransientFail, agentwrap.HealthSeverityError, sdkErr.UserDetail, sdkErr.DebugDetail, native, sdkErr)
 	}
 	return agentwrap.HealthResult{Check: check, Status: agentwrap.HealthReady, Severity: agentwrap.HealthSeverityInfo, UserDetail: readyDetail, NativeMetadata: native, StartedAt: started, FinishedAt: r.now()}
 }
 
-func readProbeOutput(reader io.ReadCloser, limit int) string {
+type probeOutput struct {
+	Sample  string
+	Matches map[string]bool
+}
+
+func readProbeOutput(reader io.ReadCloser, limit int, needles []string) probeOutput {
 	defer reader.Close()
+	matches := make(map[string]bool, len(needles))
 	if limit <= 0 {
-		_, _ = io.Copy(io.Discard, reader)
-		return ""
+		_, _ = scanProbeOutput(io.Discard, reader, needles, matches)
+		return probeOutput{Matches: matches}
 	}
 	limited := newLimitBuffer(limit)
-	_, _ = io.Copy(io.MultiWriter(limited, io.Discard), reader)
-	return limited.String()
+	_, _ = scanProbeOutput(limited, reader, needles, matches)
+	return probeOutput{Sample: limited.String(), Matches: matches}
+}
+
+func scanProbeOutput(sample io.Writer, reader io.Reader, needles []string, matches map[string]bool) (int64, error) {
+	lowerNeedles := make([]string, 0, len(needles))
+	maxNeedle := 0
+	for _, needle := range needles {
+		needle = strings.ToLower(needle)
+		if needle == "" {
+			continue
+		}
+		lowerNeedles = append(lowerNeedles, needle)
+		if len(needle) > maxNeedle {
+			maxNeedle = len(needle)
+		}
+	}
+	buf := make([]byte, 4096)
+	var total int64
+	tail := ""
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			total += int64(n)
+			chunk := string(buf[:n])
+			_, _ = sample.Write(buf[:n])
+			window := tail + strings.ToLower(chunk)
+			for _, needle := range lowerNeedles {
+				if strings.Contains(window, needle) {
+					matches[needle] = true
+				}
+			}
+			if maxNeedle > 1 && len(window) >= maxNeedle-1 {
+				tail = window[len(window)-(maxNeedle-1):]
+			} else {
+				tail = window
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return total, nil
+			}
+			return total, err
+		}
+	}
+}
+
+func mergeProbeMatches(parts ...map[string]bool) map[string]bool {
+	matches := map[string]bool{}
+	for _, part := range parts {
+		for key, value := range part {
+			matches[key] = matches[key] || value
+		}
+	}
+	return matches
+}
+
+func probeMatched(result agentwrap.HealthResult, needle string) bool {
+	matches, _ := result.NativeMetadata["matches"].(map[string]bool)
+	return matches[strings.ToLower(needle)]
 }
 
 func healthResult(now clock, check agentwrap.HealthCheckID, status agentwrap.HealthStatus, severity agentwrap.HealthSeverity, userDetail, debugDetail string, native map[string]any, err *agentwrap.SDKError) agentwrap.HealthResult {
@@ -215,7 +293,7 @@ func (r *Runtime) effectiveConfig(req agentwrap.HealthCheckRequest) agentwrap.Ef
 			adapterLayer.Secrets = append(adapterLayer.Secrets, secret)
 		}
 	}
-	caller := agentwrap.ConfigLayer{Source: agentwrap.ConfigSourceCallerRequest, Metadata: req.Metadata}
+	caller := agentwrap.ConfigLayer{Source: agentwrap.ConfigSourceCallerRequest, Metadata: agentwrap.RedactStringMap(req.Metadata)}
 	if req.Provider != "" {
 		caller.Provider = &req.Provider
 	}
