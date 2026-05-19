@@ -34,8 +34,11 @@ func TestSDKErrorFactsAndWrapping(t *testing.T) {
 	if got.ResponseHeaders["retry-after"] != "3" || got.ResponseBody == "" {
 		t.Fatalf("response facts missing: %#v", got)
 	}
-	if got.ResponseHeaders["authorization"] != "[REDACTED]" || got.Metadata["x-request-id"] != "[REDACTED]" {
+	if got.ResponseHeaders["authorization"] != "[REDACTED]" {
 		t.Fatalf("sensitive response facts were not redacted: %#v", got)
+	}
+	if got.Metadata["x-request-id"] != "abc" {
+		t.Fatalf("request id was not preserved: %#v", got.Metadata)
 	}
 	if got.ResponseBody != `{"error":"limited","token=[REDACTED]"}` {
 		t.Fatalf("ResponseBody = %q", got.ResponseBody)
