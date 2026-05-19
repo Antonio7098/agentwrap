@@ -163,6 +163,35 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 		requireSDKError(t, err, result, agentwrap.ErrorTimeout)
 	})
 
+	t.Run("caller cancellation fails with classified cancellation", func(t *testing.T) {
+		run, err := startRealSmoke(t, agentwrap.RunRequest{
+			Prompt:   "Think for a while before replying, and do not answer immediately.",
+			WorkDir:  ".",
+			Provider: agentwrap.ProviderID(provider),
+			Model:    agentwrap.ModelID(modelID),
+			Timeout:  4 * time.Minute,
+		}, append(baseOptions, WithExtraArgs("--dangerously-skip-permissions", "--variant", smokeVariant()))...)
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		events := []agentwrap.Event{waitForSmokeEvent(t, run, 5*time.Second)}
+		if err := run.Cancel(context.Background()); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		for event := range run.Events() {
+			events = append(events, event)
+		}
+		result, err := run.Wait(context.Background())
+		requireSDKError(t, err, result, agentwrap.ErrorCancellation)
+		if result.Status != agentwrap.StateCancelled {
+			t.Fatalf("status = %s, want cancelled", result.Status)
+		}
+		requireEventCategory(t, events, agentwrap.EventLifecycle)
+		if !result.Metadata.Cleanup.Attempted || !result.Metadata.Cleanup.Completed {
+			t.Fatalf("cleanup metadata = %#v", result.Metadata.Cleanup)
+		}
+	})
+
 	t.Run("ultraplan config parity", func(t *testing.T) {
 		path := configPath
 		if path == "" {
@@ -188,7 +217,7 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 
 func runRealSmoke(t *testing.T, req agentwrap.RunRequest, options ...Option) ([]agentwrap.Event, agentwrap.RunResult, error) {
 	t.Helper()
-	run, err := NewRuntime(options...).StartRun(context.Background(), req)
+	run, err := startRealSmoke(t, req, options...)
 	if err != nil {
 		return nil, agentwrap.RunResult{}, err
 	}
@@ -198,6 +227,27 @@ func runRealSmoke(t *testing.T, req agentwrap.RunRequest, options ...Option) ([]
 	}
 	result, err := run.Wait(context.Background())
 	return events, result, err
+}
+
+func startRealSmoke(t *testing.T, req agentwrap.RunRequest, options ...Option) (agentwrap.Run, error) {
+	t.Helper()
+	return NewRuntime(options...).StartRun(context.Background(), req)
+}
+
+func waitForSmokeEvent(t *testing.T, run agentwrap.Run, timeout time.Duration) agentwrap.Event {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case event, ok := <-run.Events():
+		if !ok {
+			t.Fatal("event stream closed before cancellation")
+		}
+		return event
+	case <-timer.C:
+		t.Fatal("timed out waiting for first event before cancellation")
+	}
+	return agentwrap.Event{}
 }
 
 func smokeModel(t *testing.T) string {

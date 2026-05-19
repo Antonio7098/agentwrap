@@ -3,7 +3,9 @@ package opencode
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -48,11 +50,28 @@ func decodeNativeLine(line []byte, pos int64) (nativeRecord, error) {
 	}, nil
 }
 
-func scanNativeRecords(r io.Reader, emit func(nativeRecord) error) error {
+func scanNativeRecords(ctx context.Context, r io.ReadCloser, emit func(nativeRecord) error) error {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = r.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 0, 256*1024), 16*1024*1024)
 	var pos int64
-	for scanner.Scan() {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if !scanner.Scan() {
+			break
+		}
 		pos++
 		line := scanner.Bytes()
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -66,7 +85,13 @@ func scanNativeRecords(r io.Reader, emit func(nativeRecord) error) error {
 			return err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return &decodeError{line: pos + 1, err: err}
+		}
 		return &decodeError{line: pos + 1, err: err}
 	}
 	return nil

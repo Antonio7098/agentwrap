@@ -41,16 +41,17 @@ func projectNative(in projectionInput) projectionResult {
 		payload[k] = v
 	}
 	event := agentwrap.Event{
-		ID:        agentwrap.EventID(fmt.Sprintf("%s:%d", in.runID, in.seq)),
-		Sequence:  in.seq,
-		RunID:     in.runID,
-		SessionID: firstSessionID(agentwrap.SessionID(record.SessionID), agentwrap.SessionID(stringValue(record.Data["sessionID"]))),
-		TurnID:    in.turnID,
-		Context:   in.ctx,
-		Time:      eventTime(record.Timestamp, in.now),
-		Category:  category,
-		Type:      typ,
-		Payload:   payload,
+		ID:            agentwrap.EventID(fmt.Sprintf("%s:%d", in.runID, in.seq)),
+		Sequence:      in.seq,
+		RunID:         in.runID,
+		SessionID:     firstSessionID(agentwrap.SessionID(record.SessionID), agentwrap.SessionID(stringValue(record.Data["sessionID"]))),
+		TurnID:        in.turnID,
+		CorrelationID: agentwrap.CorrelationID(in.runID),
+		Context:       in.ctx,
+		Time:          eventTime(record.Timestamp, in.now),
+		Category:      category,
+		Type:          typ,
+		Payload:       payload,
 		Raw: &agentwrap.RawPayload{
 			Source:   "opencode.stdout",
 			Encoding: "json",

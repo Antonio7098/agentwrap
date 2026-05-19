@@ -128,7 +128,7 @@ type processRunner interface {
 }
 
 type process interface {
-	Stdout() io.Reader
+	Stdout() io.ReadCloser
 	Stderr() io.Reader
 	Wait() processResult
 	Cancel(context.Context) cleanupResult

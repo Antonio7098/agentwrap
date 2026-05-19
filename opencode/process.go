@@ -38,14 +38,14 @@ func (execProcessRunner) Start(ctx context.Context, spec processSpec) (process, 
 
 type execProcess struct {
 	cmd    *exec.Cmd
-	stdout io.Reader
+	stdout io.ReadCloser
 	stderr io.Reader
 	once   sync.Once
 	result processResult
 }
 
-func (p *execProcess) Stdout() io.Reader { return p.stdout }
-func (p *execProcess) Stderr() io.Reader { return p.stderr }
+func (p *execProcess) Stdout() io.ReadCloser { return p.stdout }
+func (p *execProcess) Stderr() io.Reader     { return p.stderr }
 
 func (p *execProcess) Wait() processResult {
 	p.once.Do(func() {
@@ -70,10 +70,15 @@ func (p *execProcess) Cancel(ctx context.Context) cleanupResult {
 		return cleanupResult{}
 	}
 	result := cleanupResult{GracefulAttempted: true}
+	if p.cmd.ProcessState != nil && p.cmd.ProcessState.Exited() {
+		return result
+	}
 	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		result.Err = err
+	} else if errors.Is(err, os.ErrProcessDone) {
+		return result
 	}
-	timer := time.NewTimer(250 * time.Millisecond)
+	timer := time.NewTimer(2 * time.Second)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():

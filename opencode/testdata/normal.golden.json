@@ -1,7 +1,7 @@
 {
   "events": [
     {"category":"lifecycle","type":"lifecycle.transition","sequence":1,"session_id":"","raw_safe":false,"raw_source":"","payload_keys":["from","reason","to"]},
-    {"category":"session","type":"session.relationship","sequence":2,"session_id":"","raw_safe":false,"raw_source":"","payload_keys":["best_effort","relationship","requested_action","requested_id","session_id","unsupported"]},
+    {"category":"session","type":"session.relationship","sequence":2,"session_id":"ses_1","raw_safe":false,"raw_source":"","payload_keys":["best_effort","relationship","requested_action","requested_id","session_id","unsupported"]},
     {"category":"progress","type":"step_start","sequence":3,"session_id":"ses_1","raw_safe":false,"raw_source":"opencode.stdout","payload_keys":["line","native_type","part","sessionID"]},
     {"category":"message","type":"text","sequence":4,"session_id":"ses_1","raw_safe":false,"raw_source":"opencode.stdout","payload_keys":["line","native_type","part","sessionID"]},
     {"category":"final_result","type":"step_finish","sequence":5,"session_id":"ses_1","raw_safe":false,"raw_source":"opencode.stdout","payload_keys":["line","native_type","part","sessionID"]},

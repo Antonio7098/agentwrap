@@ -45,15 +45,16 @@ type fakeProcess struct {
 	cancel      error
 	cancelCount int
 	blockCh     chan struct{}
+	closeOnce   sync.Once
 	once        sync.Once
 	mu          sync.Mutex
 }
 
-func (p *fakeProcess) Stdout() io.Reader {
+func (p *fakeProcess) Stdout() io.ReadCloser {
 	if p.blockCh != nil {
-		return blockingReader{done: p.blockCh}
+		return blockingReadCloser{done: p.blockCh, close: &p.closeOnce}
 	}
-	return bytes.NewBufferString(p.stdout)
+	return io.NopCloser(bytes.NewBufferString(p.stdout))
 }
 func (p *fakeProcess) Stderr() io.Reader   { return bytes.NewBufferString(p.stderr) }
 func (p *fakeProcess) Wait() processResult { return p.result }
@@ -63,7 +64,7 @@ func (p *fakeProcess) Cancel(context.Context) cleanupResult {
 	p.mu.Unlock()
 	p.once.Do(func() {
 		if p.blockCh != nil {
-			close(p.blockCh)
+			p.closeOnce.Do(func() { close(p.blockCh) })
 		}
 	})
 	return cleanupResult{GracefulAttempted: true, Err: p.cancel}
@@ -75,11 +76,19 @@ func (p *fakeProcess) CancelCount() int {
 	return p.cancelCount
 }
 
-type blockingReader struct{ done <-chan struct{} }
+type blockingReadCloser struct {
+	done  chan struct{}
+	close *sync.Once
+}
 
-func (r blockingReader) Read([]byte) (int, error) {
+func (r blockingReadCloser) Read([]byte) (int, error) {
 	<-r.done
 	return 0, io.EOF
+}
+
+func (r blockingReadCloser) Close() error {
+	r.close.Do(func() { close(r.done) })
+	return nil
 }
 
 func TestStartRunBuildsStructuredCommand(t *testing.T) {
@@ -272,10 +281,12 @@ func TestCancelClassifiesRunAsCancelled(t *testing.T) {
 	if err := run.Cancel(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	_, result, err := drainRunErr(t, run)
+	events, result, err := drainRunErr(t, run)
 	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorCancellation || result.Status != agentwrap.StateCancelled {
 		t.Fatalf("err = %v result=%#v", err, result)
 	}
+	requireLifecycleTransition(t, events, agentwrap.StateRunning, agentwrap.StateCancelled, "caller_cancel")
+	requireLifecycleTransition(t, events, agentwrap.StateCancelled, agentwrap.StateCleanedUp, "caller_cancel")
 }
 
 func TestContextTimeoutClassifiesRunAsTimeout(t *testing.T) {
@@ -288,6 +299,25 @@ func TestContextTimeoutClassifiesRunAsTimeout(t *testing.T) {
 	_, result, err := drainRunErr(t, run)
 	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorTimeout {
 		t.Fatalf("err = %v result=%#v", err, result)
+	}
+}
+
+func TestBlockedStdoutTimeoutStaysTimeout(t *testing.T) {
+	proc := &fakeProcess{blockCh: make(chan struct{})}
+	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: proc}))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello", Timeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil {
+		t.Fatalf("expected timeout result, got nil err result=%#v", result)
+	}
+	if result.Err == nil || result.Err.Category != agentwrap.ErrorTimeout {
+		t.Fatalf("result err = %#v", result.Err)
+	}
+	if result.Status != agentwrap.StateFailed {
+		t.Fatalf("status = %s", result.Status)
 	}
 }
 
@@ -520,4 +550,17 @@ func intMapValue(value any) map[string]int {
 		}
 	}
 	return out
+}
+
+func requireLifecycleTransition(t *testing.T, events []agentwrap.Event, from, to agentwrap.LifecycleState, reason string) {
+	t.Helper()
+	for _, event := range events {
+		if event.Category != agentwrap.EventLifecycle {
+			continue
+		}
+		if event.Payload["from"] == string(from) && event.Payload["to"] == string(to) && event.Payload["reason"] == reason {
+			return
+		}
+	}
+	t.Fatalf("missing lifecycle transition %s -> %s reason=%s in %#v", from, to, reason, events)
 }

@@ -10,6 +10,9 @@ func TestLifecycleEventPayload(t *testing.T) {
 	if event.Category != EventLifecycle || event.Type != "lifecycle.transition" {
 		t.Fatalf("event = %#v", event)
 	}
+	if event.CorrelationID != "run-1" {
+		t.Fatalf("correlation id = %q", event.CorrelationID)
+	}
 	if event.Payload["from"] != "running" || event.Payload["to"] != "cleaned_up" || event.Payload["reason"] != "done" {
 		t.Fatalf("payload = %#v", event.Payload)
 	}
@@ -26,6 +29,9 @@ func TestSessionEventPayload(t *testing.T) {
 	event := SessionEvent("run-1", "session-2", "turn-1", RuntimeContext{RuntimeKind: "fake"}, 8, time.Unix(1, 0), metadata)
 	if event.Category != EventSession || event.Type != "session.relationship" {
 		t.Fatalf("event = %#v", event)
+	}
+	if event.CorrelationID != "run-1" {
+		t.Fatalf("correlation id = %q", event.CorrelationID)
 	}
 	if event.Payload["requested_action"] != "continue" || event.Payload["relationship"] != "best_effort" || event.Payload["best_effort"] != true {
 		t.Fatalf("payload = %#v", event.Payload)
