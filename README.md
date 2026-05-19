@@ -9,6 +9,8 @@ first OpenCode adapter:
 - runtime-neutral run/session/turn/event/artifact/metadata/capability types
 - classified SDK errors
 - SDK health/preflight contracts and source-aware effective config summaries
+- runtime-neutral resilience policy execution for bounded retry, backoff,
+  fallback, rate-limit handling, and per-attempt metadata
 - lifecycle/session events plus cleanup metadata that does not overwrite the
   primary run result
 - OpenCode structured-output adapter with timeout/cancellation cleanup and
@@ -18,6 +20,26 @@ first OpenCode adapter:
   preflight blocking before process launch
 - private structured-event fixtures and fake lifecycle tests under `internal/testkit`
 - private fake runtime contract proof under `internal/testkit`
+
+## Resilience Policies
+
+`PolicyRunner` wraps existing `Runtime` implementations instead of moving retry
+logic into adapters. A policy receives a `PolicyContext` with the classified
+error, attempt number, runtime/provider/model context, prior attempts, session
+metadata, and rate-limit information where available. It returns an explicit
+`PolicyDecision`: stop, retry, wait, or fallback.
+
+The built-in `BasicPolicy` is conservative:
+
+- retries only classified retryable failures
+- does not retry unknown or unrecoverable failures by default
+- requires explicit bounds through `MaxAttemptsPerTarget`
+- uses `RateLimitInfo.RetryAfter` or reset metadata before generic backoff
+- falls back only to configured alternatives
+
+Every attempt is retained in `RunMetadata.Attempts`, and policy decisions are
+recorded in `RunMetadata.Policy.Decisions`. Policy execution emits canonical
+`rate_limit`, `retry`, and `fallback` events with one logical correlation ID.
 
 ## Development
 
@@ -38,6 +60,8 @@ gofmt -w .
 - Real OpenCode invocation remains opt-in through the gated smoke test.
 - Health checks do not start billable agent work; uncertain provider/model/auth
   readiness is reported as unknown or degraded instead of guessed as ready.
-- No retry/fallback, validation/repair, or persistence implementation yet.
+- Validation/repair and persistence are not implemented yet.
+- Policy execution is bounded and explicit; there is no global circuit breaker
+  or provider-wide throttling layer yet.
 - No UltraPlan workflow logic in this SDK.
 - CLI-oriented study material is treated as internal engineering evidence only, not product direction.
