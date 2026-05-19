@@ -113,6 +113,36 @@ func TestStartRunBuildsStructuredCommand(t *testing.T) {
 	}
 }
 
+func TestPolicyRunnerWrapsOpenCodeRuntimeWithoutAdapterRetry(t *testing.T) {
+	runner := &fakeRunner{procs: []process{
+		&fakeProcess{stdout: readFixture(t, "normal.ndjson"), stderr: "temporary", result: processResult{ExitCode: 1}},
+		&fakeProcess{stdout: readFixture(t, "normal.ndjson")},
+	}}
+	rt := NewRuntime(withProcessRunner(runner))
+	policy := agentwrap.PolicyRunner{
+		Runtime: rt,
+		Policy:  agentwrap.BasicPolicy{MaxAttemptsPerTarget: 2, Backoff: agentwrap.FixedBackoff{}},
+		Sleep:   func(context.Context, time.Duration) error { return nil },
+	}
+	run, err := policy.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := run.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait error: %v", err)
+	}
+	if runner.starts != 2 {
+		t.Fatalf("OpenCode starts = %d, want 2 policy-managed attempts", runner.starts)
+	}
+	if len(result.Metadata.Attempts) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(result.Metadata.Attempts))
+	}
+	if len(result.Metadata.Policy.Decisions) != 1 || result.Metadata.Policy.Decisions[0].Kind != agentwrap.PolicyDecisionRetry {
+		t.Fatalf("policy decisions = %#v", result.Metadata.Policy.Decisions)
+	}
+}
+
 func TestRunSuccessEmitsCanonicalEventsAndResult(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson"), stderr: "diagnostic"}}
 	rt := NewRuntime(withProcessRunner(runner))
@@ -226,6 +256,92 @@ func TestRunMalformedFails(t *testing.T) {
 	}
 	if result.Status != agentwrap.StateFailed {
 		t.Fatalf("status = %s", result.Status)
+	}
+}
+
+func TestClassifyExitErrorDetectsJSONRateLimit(t *testing.T) {
+	stderr := `{"statusCode":429,"responseHeaders":{"retry-after-ms":"1500","x-ratelimit-limit-requests":"500","x-ratelimit-remaining-requests":"0","x-ratelimit-reset-requests":"1s"},"responseBody":"{\"type\":\"error\",\"error\":{\"type\":\"too_many_requests\"}}","message":"too many requests"}`
+	err := classifyExitError(processResult{ExitCode: 1}, stderr)
+	if err == nil || err.Category != agentwrap.ErrorRateLimit || !err.Retryable {
+		t.Fatalf("err = %#v, want retryable rate limit", err)
+	}
+}
+
+func TestClassifyExitErrorSkipsQuotaExceeded(t *testing.T) {
+	stderr := `{"statusCode":429,"responseBody":"insufficient_quota","message":"quota exceeded"}`
+	err := classifyExitError(processResult{ExitCode: 1}, stderr)
+	if err == nil || err.Category == agentwrap.ErrorRateLimit {
+		t.Fatalf("err = %#v, want non-rate-limit classification", err)
+	}
+}
+
+func TestClassifyRateLimitDataParsesOpenCodeHeaders(t *testing.T) {
+	classified := classifyRateLimitData("opencode event", map[string]any{
+		"statusCode": 429,
+		"message":    "provider overloaded",
+		"responseHeaders": map[string]any{
+			"retry-after":                            "2",
+			"anthropic-ratelimit-requests-limit":     "500",
+			"anthropic-ratelimit-requests-remaining": "0",
+			"anthropic-ratelimit-requests-reset":     "10s",
+		},
+		"metadata": map[string]any{"provider": "anthropic", "model": "claude"},
+	}, agentwrap.RuntimeContext{})
+	if classified == nil || classified.info == nil {
+		t.Fatal("expected rate-limit classification")
+	}
+	if classified.info.Provider != "anthropic" || classified.info.Model != "claude" {
+		t.Fatalf("info = %#v", classified.info)
+	}
+	if classified.info.RetryAfter != 2*time.Second {
+		t.Fatalf("retry after = %s, want 2s", classified.info.RetryAfter)
+	}
+}
+
+func TestProjectNativeFatalErrorPromotesRateLimit(t *testing.T) {
+	record := nativeRecord{
+		Type: "error",
+		Data: map[string]any{
+			"message": "too many requests",
+			"responseHeaders": map[string]any{
+				"retry-after-ms": "500",
+			},
+			"statusCode": 429,
+		},
+	}
+	projected := projectNative(projectionInput{
+		runID:  "run-1",
+		ctx:    agentwrap.RuntimeContext{Provider: "openai", Model: "gpt"},
+		seq:    1,
+		now:    time.Now().UTC(),
+		record: record,
+	})
+	if projected.fatal == nil || projected.fatal.Category != agentwrap.ErrorRateLimit {
+		t.Fatalf("fatal = %#v, want rate limit", projected.fatal)
+	}
+	if _, ok := projected.event.Payload["rate_limit"]; !ok {
+		t.Fatalf("payload missing rate_limit: %#v", projected.event.Payload)
+	}
+}
+
+func TestRunExitRateLimitStoresRateLimitMetadata(t *testing.T) {
+	stderr := `{"statusCode":429,"responseHeaders":{"retry-after-ms":"1500"},"message":"too many requests"}`
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson"), stderr: stderr, result: processResult{ExitCode: 1}}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello", Provider: "openai", Model: "gpt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorRateLimit {
+		t.Fatalf("err = %v result=%#v", err, result)
+	}
+	info, ok := result.Metadata.NativeMetadata["rate_limit_info"].(*agentwrap.RateLimitInfo)
+	if !ok || info == nil {
+		t.Fatalf("rate_limit_info = %#v", result.Metadata.NativeMetadata["rate_limit_info"])
+	}
+	if info.RetryAfter != 1500*time.Millisecond {
+		t.Fatalf("retry_after = %s, want 1500ms", info.RetryAfter)
 	}
 }
 

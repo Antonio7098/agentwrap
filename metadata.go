@@ -18,6 +18,8 @@ type RunMetadata struct {
 	Context        RuntimeContext
 	ParentRunID    RunID
 	Attempt        int
+	Attempts       []AttemptSummary
+	Policy         PolicyMetadata
 	Status         LifecycleState
 	StartedAt      time.Time
 	FinishedAt     time.Time
@@ -31,6 +33,67 @@ type RunMetadata struct {
 	EstimatedCost  *CostEstimate
 	ThroughputTPS  *float64
 	NativeMetadata map[string]any
+}
+
+// AttemptSummary records one runtime attempt made during policy execution.
+type AttemptSummary struct {
+	Attempt              int
+	AttemptOnTarget      int
+	TargetIndex          int
+	RunID                RunID
+	ParentRunID          RunID
+	Context              RuntimeContext
+	Request              AttemptRequest
+	Status               LifecycleState
+	StartedAt            time.Time
+	FinishedAt           time.Time
+	Duration             time.Duration
+	Session              SessionMetadata
+	ErrorCategory        ErrorCategory
+	Error                *SDKError
+	RateLimit            *RateLimitInfo
+	PolicyDecisionReason string
+	NativeMetadata       map[string]any
+}
+
+// AttemptRequest records safe request fields that influence retry/fallback
+// behavior without embedding prompts or other large/sensitive input.
+type AttemptRequest struct {
+	WorkDir       string
+	SessionID     SessionID
+	Provider      ProviderID
+	Model         ModelID
+	Permissions   PermissionMode
+	Sandbox       SandboxMode
+	Timeout       time.Duration
+	WantSession   bool
+	SessionAction SessionAction
+	RequireCaps   []Capability
+	RequireHealth []HealthCheckID
+	MetadataKeys  []string
+}
+
+// PolicyMetadata records resilience policy decisions for audit and dashboards.
+type PolicyMetadata struct {
+	LogicalRunID     RunID
+	FinalAttempt     int
+	FinalTargetIndex int
+	Exhausted        bool
+	ExhaustedReason  string
+	Decisions        []PolicyDecisionRecord
+}
+
+// PolicyDecisionRecord is a durable, user-safe summary of a policy decision.
+type PolicyDecisionRecord struct {
+	Attempt     int
+	TargetIndex int
+	Kind        PolicyDecisionKind
+	Reason      string
+	Detail      string
+	Delay       time.Duration
+	Context     RuntimeContext
+	RateLimit   *RateLimitInfo
+	Metadata    map[string]any
 }
 
 // CleanupMetadata reports owned-resource cleanup separately from the primary

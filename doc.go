@@ -9,6 +9,11 @@
 // preflight checks independently from StartRun. Health reports and effective
 // configuration summaries are source-aware and redact secret values by default.
 //
+// PolicyRunner wraps runtimes with explicit resilience policies for bounded
+// retry, fallback, backoff, and rate-limit handling. Runtime adapters still
+// report their native attempt outcomes directly; policy execution records every
+// attempt and emits canonical retry, fallback, and rate-limit events.
+//
 // RunResult.Status preserves the primary run outcome. Cleanup of owned runtime
 // resources is reported separately through RunMetadata.Cleanup and lifecycle
 // events so a successful or failed run can still expose cleanup diagnostics.

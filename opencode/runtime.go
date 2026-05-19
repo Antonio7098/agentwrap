@@ -301,6 +301,11 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 			"native_extension_count": r.categories[string(agentwrap.EventNativeExtension)],
 		},
 	}
+	if sdkErr != nil && sdkErr.Category == agentwrap.ErrorRateLimit {
+		if info := classifyRateLimitText("opencode run", r.stderrBuffer.String(), r.context); info != nil && info.info != nil {
+			metadata.NativeMetadata["rate_limit_info"] = info.info
+		}
+	}
 	if sdkErr != nil {
 		metadata.Errors = []agentwrap.SDKError{*sdkErr}
 	}
@@ -472,6 +477,9 @@ func classifyDecodeError(err error) *agentwrap.SDKError {
 }
 
 func classifyExitError(result processResult, stderr string) *agentwrap.SDKError {
+	if classified := classifyRateLimitText("opencode run", stderr, agentwrap.RuntimeContext{}); classified != nil {
+		return classified.err
+	}
 	return agentwrap.NewError(agentwrap.ErrorRuntimeExit, "opencode run", "OpenCode exited before a successful final result", result.Err, agentwrap.WithDebugDetail(fmt.Sprintf("exit_code=%d stderr=%s", result.ExitCode, debugDetail(stderr))))
 }
 
