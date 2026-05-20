@@ -26,6 +26,12 @@
 // and repair facts are emitted as canonical validation events and stored in
 // RunMetadata.Validation and RunMetadata.Repair.
 //
+// ObservingRuntime wraps any Runtime with active/completed run records, ordered
+// event records, optional EventSink fan-out, and optional RunStore persistence.
+// The in-memory store is a deterministic reference implementation; production
+// durability remains caller-owned. Unsafe raw native payload bytes are omitted
+// from persisted event records by default and recorded with omission metadata.
+//
 // RunResult.Status preserves the primary run outcome. Cleanup of owned runtime
 // resources is reported separately through RunMetadata.Cleanup and lifecycle
 // events so a successful or failed run can still expose cleanup diagnostics.
