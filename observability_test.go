@@ -104,7 +104,7 @@ func TestObservingRuntimeStoresRecordsAndOmitsUnsafeRawPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	drainEvents(run.Events())
+	drainEvents(t, run.Events())
 	result, err := run.Wait(context.Background())
 	if err != nil {
 		t.Fatalf("wait: %v", err)
@@ -141,6 +141,74 @@ func TestObservingRuntimeStoresRecordsAndOmitsUnsafeRawPayload(t *testing.T) {
 	}
 }
 
+func TestObservingRuntimePreservesEventCollectedArtifacts(t *testing.T) {
+	store := agentwrap.NewMemoryRunStore()
+	runtime := agentwrap.ObservingRuntime{
+		Runtime: staticRuntime{run: &staticRun{
+			id: "event-artifact-run",
+			events: []agentwrap.Event{{
+				ID:    "artifact-event",
+				RunID: "event-artifact-run",
+				Type:  "artifact.created",
+				Payload: agentwrap.EventPayloadWithKind(agentwrap.EventArtifact, agentwrap.EventPayload{
+					"artifact": agentwrap.ArtifactRef{ID: "event-report", URI: "file://event-report.md", Kind: "markdown"},
+				}),
+			}},
+			result: agentwrap.RunResult{
+				RunID:      "event-artifact-run",
+				Status:     agentwrap.StatusCompleted,
+				StartedAt:  time.Now().Add(-time.Second).UTC(),
+				FinishedAt: time.Now().UTC(),
+			},
+		}},
+		Store: store,
+	}
+	run, err := runtime.StartRun(context.Background(), agentwrap.RunRequest{})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	drainEvents(t, run.Events())
+	result, err := run.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	record, ok, err := store.GetCompletedRun(context.Background(), result.RunID)
+	if err != nil || !ok {
+		t.Fatalf("completed lookup ok=%v err=%v", ok, err)
+	}
+	if len(record.Artifacts) != 1 || record.Artifacts[0].ID != "event-report" {
+		t.Fatalf("artifacts = %#v", record.Artifacts)
+	}
+}
+
+func TestRunEventRecordPayloadIsDeepCloned(t *testing.T) {
+	store := agentwrap.NewMemoryRunStore()
+	ctx := context.Background()
+	nested := map[string]any{"value": "original"}
+	items := []any{map[string]any{"name": "first"}}
+	record := agentwrap.RunEventRecord{
+		RunID:    "run-1",
+		EventID:  "event-1",
+		Sequence: 1,
+		Payload:  agentwrap.EventPayload{"nested": nested, "items": items},
+	}
+	if err := store.AppendEvent(ctx, record); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	nested["value"] = "mutated"
+	items[0].(map[string]any)["name"] = "mutated"
+	events, err := store.ListRunEvents(ctx, "run-1")
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	gotNested := events[0].Payload["nested"].(map[string]any)
+	gotItems := events[0].Payload["items"].([]any)
+	gotItem := gotItems[0].(map[string]any)
+	if gotNested["value"] != "original" || gotItem["name"] != "first" {
+		t.Fatalf("payload was not deeply cloned: %#v", events[0].Payload)
+	}
+}
+
 func TestObservingRuntimeRequiredSinkFailureChangesWaitError(t *testing.T) {
 	sinkErr := errors.New("sink down")
 	runtime := agentwrap.ObservingRuntime{
@@ -157,7 +225,7 @@ func TestObservingRuntimeRequiredSinkFailureChangesWaitError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	drainEvents(run.Events())
+	drainEvents(t, run.Events())
 	_, err = run.Wait(context.Background())
 	if err == nil {
 		t.Fatal("expected required sink failure")
@@ -187,7 +255,7 @@ func TestObservingRuntimeBestEffortSinkFailureIsRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	drainEvents(run.Events())
+	drainEvents(t, run.Events())
 	result, err := run.Wait(context.Background())
 	if err != nil {
 		t.Fatalf("wait should preserve primary outcome: %v", err)
@@ -205,17 +273,30 @@ func TestMemoryRunStoreConcurrentRunIsolation(t *testing.T) {
 	store := agentwrap.NewMemoryRunStore()
 	ctx := context.Background()
 	var wg sync.WaitGroup
+	errCh := make(chan error, 60)
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			runID := agentwrap.RunID(fmt.Sprintf("run-%d", i))
-			_ = store.UpsertRun(ctx, agentwrap.RunRecord{RunID: runID, Status: agentwrap.StatusRunning})
-			_ = store.AppendEvent(ctx, agentwrap.RunEventRecord{RunID: runID, Sequence: 1, EventID: agentwrap.EventID(fmt.Sprintf("event-%d", i))})
-			_ = store.UpsertRun(ctx, agentwrap.RunRecord{RunID: runID, Status: agentwrap.StatusCompleted, CompletedAt: time.Now().UTC()})
+			if err := store.UpsertRun(ctx, agentwrap.RunRecord{RunID: runID, Status: agentwrap.StatusRunning}); err != nil {
+				errCh <- fmt.Errorf("upsert running %s: %w", runID, err)
+				return
+			}
+			if err := store.AppendEvent(ctx, agentwrap.RunEventRecord{RunID: runID, Sequence: 1, EventID: agentwrap.EventID(fmt.Sprintf("event-%d", i))}); err != nil {
+				errCh <- fmt.Errorf("append event %s: %w", runID, err)
+				return
+			}
+			if err := store.UpsertRun(ctx, agentwrap.RunRecord{RunID: runID, Status: agentwrap.StatusCompleted, CompletedAt: time.Now().UTC()}); err != nil {
+				errCh <- fmt.Errorf("upsert completed %s: %w", runID, err)
+			}
 		}(i)
 	}
 	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
 	active, err := store.ListActiveRuns(ctx)
 	if err != nil {
 		t.Fatalf("active: %v", err)
@@ -246,7 +327,60 @@ func (s failingSink) AppendEvent(context.Context, agentwrap.RunEventRecord) erro
 	return s.err
 }
 
-func drainEvents(events <-chan agentwrap.Event) {
-	for range events {
+type staticRuntime struct {
+	run *staticRun
+}
+
+func (r staticRuntime) StartRun(context.Context, agentwrap.RunRequest) (agentwrap.Run, error) {
+	return r.run, nil
+}
+
+func (r staticRuntime) Capabilities(context.Context) (agentwrap.Capabilities, error) {
+	return agentwrap.Capabilities{}, nil
+}
+
+type staticRun struct {
+	id     agentwrap.RunID
+	events []agentwrap.Event
+	result agentwrap.RunResult
+}
+
+func (r *staticRun) ID() agentwrap.RunID {
+	return r.id
+}
+
+func (r *staticRun) Events() <-chan agentwrap.Event {
+	events := make(chan agentwrap.Event, len(r.events))
+	for _, event := range r.events {
+		events <- event
+	}
+	close(events)
+	return events
+}
+
+func (r *staticRun) Wait(context.Context) (agentwrap.RunResult, error) {
+	if r.result.Err != nil {
+		return r.result, r.result.Err
+	}
+	return r.result, nil
+}
+
+func (r *staticRun) Cancel(context.Context) error {
+	return nil
+}
+
+func drainEvents(t *testing.T, events <-chan agentwrap.Event) {
+	t.Helper()
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return
+			}
+		case <-timeout.C:
+			t.Fatal("timed out draining events channel")
+		}
 	}
 }

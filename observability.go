@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -367,7 +368,7 @@ func (r *observedRun) mergeResultLocked(result RunResult) {
 	r.record.Cleanup = metadata.Cleanup
 	r.record.Validation = metadata.Validation
 	r.record.Repair = metadata.Repair
-	r.record.Artifacts = mergeArtifacts(result.Artifacts, metadata.Artifacts, r.record)
+	r.record.Artifacts = mergeArtifacts(r.record.Artifacts, result.Artifacts, metadata.Artifacts, r.record)
 	r.record.Warnings = append([]string(nil), result.Warnings...)
 	r.record.Warnings = append(r.record.Warnings, metadata.Warnings...)
 	r.record.Errors = append([]SDKError(nil), metadata.Errors...)
@@ -597,10 +598,10 @@ func withProducerMetadata(artifact ArtifactRef, record RunRecord) ArtifactRef {
 	return artifact
 }
 
-func mergeArtifacts(resultArtifacts, metadataArtifacts []ArtifactRef, record RunRecord) []ArtifactRef {
+func mergeArtifacts(existingArtifacts, resultArtifacts, metadataArtifacts []ArtifactRef, record RunRecord) []ArtifactRef {
 	var merged []ArtifactRef
 	seen := map[ArtifactID]bool{}
-	for _, artifact := range append(append([]ArtifactRef(nil), resultArtifacts...), metadataArtifacts...) {
+	for _, artifact := range append(append(append([]ArtifactRef(nil), existingArtifacts...), resultArtifacts...), metadataArtifacts...) {
 		if artifact.ID != "" && seen[artifact.ID] {
 			continue
 		}
@@ -663,7 +664,73 @@ func clonePayload(src EventPayload) EventPayload {
 	}
 	dst := make(EventPayload, len(src))
 	for key, value := range src {
-		dst[key] = value
+		dst[key] = clonePayloadValue(value)
 	}
 	return dst
+}
+
+func clonePayloadValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	cloned := cloneReflectValue(reflect.ValueOf(value))
+	if !cloned.IsValid() {
+		return nil
+	}
+	return cloned.Interface()
+}
+
+func cloneReflectValue(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+	switch value.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := cloneReflectValue(value.Elem())
+		if value.Kind() == reflect.Interface {
+			return cloned
+		}
+		ptr := reflect.New(value.Type().Elem())
+		ptr.Elem().Set(cloned)
+		return ptr
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			cloned.SetMapIndex(cloneReflectValue(iter.Key()), cloneReflectValue(iter.Value()))
+		}
+		return cloned
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			cloned.Index(i).Set(cloneReflectValue(value.Index(i)))
+		}
+		return cloned
+	case reflect.Array:
+		cloned := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			cloned.Index(i).Set(cloneReflectValue(value.Index(i)))
+		}
+		return cloned
+	case reflect.Struct:
+		cloned := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.NumField(); i++ {
+			if !cloned.Field(i).CanSet() {
+				return value
+			}
+			cloned.Field(i).Set(cloneReflectValue(value.Field(i)))
+		}
+		return cloned
+	default:
+		return value
+	}
 }
