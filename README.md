@@ -11,6 +11,11 @@ first OpenCode adapter:
 - SDK health/preflight contracts and source-aware effective config summaries
 - runtime-neutral resilience policy execution for bounded retry, backoff,
   fallback, rate-limit handling, and per-attempt metadata
+- runtime-neutral output validation for files, directories, artifact
+  references, Markdown template files, JSON shape checks, metadata fields, and
+  caller-defined validators
+- bounded validation repair attempts that inherit the original session,
+  sandbox, runtime/model, and permission posture by default
 - initialization-time permission policies with OpenCode native config
   translation and permission audit metadata
 - lifecycle/session events plus cleanup metadata that does not overwrite the
@@ -42,6 +47,27 @@ The built-in `BasicPolicy` is conservative:
 Every attempt is retained in `RunMetadata.Attempts`, and policy decisions are
 recorded in `RunMetadata.Policy.Decisions`. Policy execution emits canonical
 `rate_limit`, `retry`, and `fallback` events with one logical correlation ID.
+
+## Output Validation And Repair
+
+`ValidatingRuntime` wraps any `Runtime` and runs configured validators after a
+successful runtime result. A configured run is successful only when the runtime
+finishes and required validators pass. Validation results are recorded in
+`RunMetadata.Validation` and emitted as canonical validation events.
+
+Built-in expectations cover durable output checks: file presence, directory
+presence, artifact references, Markdown artifact compliance against a template
+file, JSON well-formedness plus minimal required fields, and metadata fields.
+Callers can add `ValidatorFunc` checks for product-specific rules without
+placing those rules in the runtime adapter.
+
+Repair is bounded with `RepairConfig.MaxAttempts`. Repair prompts are built
+from safe expected/observed failure facts and artifact references, not raw large
+content. Repair requests default to `SessionActionContinue` and inherit the
+original workdir, provider/model, sandbox, permission mode, and
+`PermissionPolicy` unless the caller overrides the repair request. Permission
+denial during repair remains an `ErrorPermission`; exhausted repair returns
+`ErrorRepairExhausted`.
 
 ## Permission Policies
 
@@ -81,7 +107,7 @@ gofmt -w .
 - Real OpenCode invocation remains opt-in through the gated smoke test.
 - Health checks do not start billable agent work; uncertain provider/model/auth
   readiness is reported as unknown or degraded instead of guessed as ready.
-- Validation/repair and persistence are not implemented yet.
+- Persistence hooks are not implemented yet.
 - Live permission approval transport is deferred until the SDK has an OpenCode
   server-mode adapter.
 - Policy execution is bounded and explicit; there is no global circuit breaker
