@@ -215,6 +215,141 @@ func TestRealOpenCodeSmokeSuite(t *testing.T) {
 	})
 }
 
+func TestRealOpenCodePermissionSmoke(t *testing.T) {
+	if os.Getenv("AGENTWRAP_OPENCODE_PERMISSION_SMOKE") != "1" {
+		t.Skip("set AGENTWRAP_OPENCODE_PERMISSION_SMOKE=1 to run the real OpenCode permission smoke test")
+	}
+
+	model := smokeModel(t)
+	provider, modelID := splitSmokeModel(model)
+	configPath := os.Getenv("AGENTWRAP_OPENCODE_SMOKE_CONFIG")
+	var baseOptions []Option
+	if configPath != "" {
+		baseOptions = append(baseOptions, WithEnv("OPENCODE_CONFIG="+configPath))
+	}
+
+	t.Run("initialized policy allows shell without skip permissions", func(t *testing.T) {
+		dir := t.TempDir()
+		output := filepath.Join(dir, "agentwrap-permission-smoke.txt")
+		events, result, err := runRealSmoke(t, agentwrap.RunRequest{
+			Prompt:   "Use the shell tool to run exactly: printf 'agentwrap permission smoke ok\n' > agentwrap-permission-smoke.txt. Then reply with exactly: permission smoke done",
+			WorkDir:  dir,
+			Provider: agentwrap.ProviderID(provider),
+			Model:    agentwrap.ModelID(modelID),
+			Timeout:  3 * time.Minute,
+			PermissionPolicy: &agentwrap.PermissionPolicy{
+				Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
+					agentwrap.PermissionToolShell: agentwrap.PermissionActionAllow,
+					agentwrap.PermissionToolEdit:  agentwrap.PermissionActionDeny,
+					agentwrap.PermissionToolRead:  agentwrap.PermissionActionAllow,
+				},
+			},
+		}, append(baseOptions, WithExtraArgs("--variant", smokeVariant()))...)
+		if err != nil {
+			t.Fatalf("wait: %v result=%#v\nevents:\n%s", err, result, summarizeEvents(events))
+		}
+		requireCompleted(t, result)
+		requireEventKind(t, events, agentwrap.EventPermission)
+		requirePermissionPolicyEvent(t, events)
+		if result.Metadata.Permissions.Policy.Tools[agentwrap.PermissionToolShell] != agentwrap.PermissionActionAllow {
+			t.Fatalf("permission metadata = %#v", result.Metadata.Permissions)
+		}
+		if len(result.Metadata.Permissions.Audit) == 0 {
+			t.Fatalf("missing permission audit metadata: %#v", result.Metadata.Permissions)
+		}
+		data, err := os.ReadFile(output)
+		if err != nil {
+			t.Fatalf("expected shell permission allow to create %s: %v\nevents:\n%s", output, err, summarizeEvents(events))
+		}
+		if !strings.Contains(string(data), "agentwrap permission smoke ok") {
+			t.Fatalf("unexpected file content: %q", string(data))
+		}
+	})
+
+	t.Run("required unsupported path rule fails before launch", func(t *testing.T) {
+		runner := NewRuntime(baseOptions...)
+		_, err := runner.StartRun(context.Background(), agentwrap.RunRequest{
+			Prompt:   "Reply with one sentence.",
+			WorkDir:  ".",
+			Provider: agentwrap.ProviderID(provider),
+			Model:    agentwrap.ModelID(modelID),
+			Timeout:  1 * time.Minute,
+			PermissionPolicy: &agentwrap.PermissionPolicy{
+				PathRules: []agentwrap.PermissionPathRule{{
+					Path:   filepath.Join(t.TempDir(), "outside.txt"),
+					Action: agentwrap.PermissionActionDeny,
+				}},
+			},
+		})
+		var sdkErr *agentwrap.SDKError
+		if err == nil || !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+			t.Fatalf("err = %#v, want configuration SDKError", err)
+		}
+	})
+
+	t.Run("best effort unsupported path rule records metadata", func(t *testing.T) {
+		events, result, err := runRealSmoke(t, agentwrap.RunRequest{
+			Prompt:   "Reply with exactly: best effort permission smoke ok",
+			WorkDir:  ".",
+			Provider: agentwrap.ProviderID(provider),
+			Model:    agentwrap.ModelID(modelID),
+			Timeout:  2 * time.Minute,
+			PermissionPolicy: &agentwrap.PermissionPolicy{
+				UnsupportedBehavior: agentwrap.PermissionUnsupportedBestEffort,
+				Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
+					agentwrap.PermissionToolShell: agentwrap.PermissionActionDeny,
+				},
+				PathRules: []agentwrap.PermissionPathRule{{
+					Path:   filepath.Join(t.TempDir(), "unsupported.txt"),
+					Action: agentwrap.PermissionActionDeny,
+				}},
+			},
+		}, append(baseOptions, WithExtraArgs("--variant", smokeVariant()))...)
+		if err != nil {
+			t.Fatalf("wait: %v result=%#v\nevents:\n%s", err, result, summarizeEvents(events))
+		}
+		requireCompleted(t, result)
+		requirePermissionPolicyEvent(t, events)
+		if len(result.Metadata.Permissions.Unsupported) == 0 {
+			t.Fatalf("missing unsupported permission metadata: %#v", result.Metadata.Permissions)
+		}
+	})
+
+	t.Run("ask shell surfaces permission or blocking event", func(t *testing.T) {
+		run, err := startRealSmoke(t, agentwrap.RunRequest{
+			Prompt:   "Use the shell tool to run exactly: printf 'agentwrap ask smoke ok\n'. Do not answer before using the shell tool.",
+			WorkDir:  t.TempDir(),
+			Provider: agentwrap.ProviderID(provider),
+			Model:    agentwrap.ModelID(modelID),
+			Timeout:  2 * time.Minute,
+			PermissionPolicy: &agentwrap.PermissionPolicy{
+				Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
+					agentwrap.PermissionToolShell: agentwrap.PermissionActionAsk,
+					agentwrap.PermissionToolRead:  agentwrap.PermissionActionAllow,
+				},
+			},
+		}, append(baseOptions, WithExtraArgs("--variant", smokeVariant()))...)
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		events, matched := collectUntilSmokeKind(t, run, 90*time.Second, agentwrap.EventPermission, agentwrap.EventBlocking)
+		if err := run.Cancel(context.Background()); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+		for event := range run.Events() {
+			events = append(events, event)
+		}
+		result, _ := run.Wait(context.Background())
+		requirePermissionPolicyEvent(t, events)
+		if !matched {
+			t.Fatalf("ask shell did not surface permission/blocking event before completion/cancel; result=%#v\nevents:\n%s", result, summarizeEvents(events))
+		}
+		if result.Metadata.Permissions.Policy.Tools[agentwrap.PermissionToolShell] != agentwrap.PermissionActionAsk {
+			t.Fatalf("permission metadata = %#v", result.Metadata.Permissions)
+		}
+	})
+}
+
 func TestRealOpenCodeHealthSmoke(t *testing.T) {
 	if os.Getenv("AGENTWRAP_OPENCODE_HEALTH_SMOKE") != "1" {
 		t.Skip("set AGENTWRAP_OPENCODE_HEALTH_SMOKE=1 to run the real OpenCode health smoke test")
@@ -381,6 +516,31 @@ func waitForSmokeEvent(t *testing.T, run agentwrap.Run, timeout time.Duration) a
 	return agentwrap.Event{}
 }
 
+func collectUntilSmokeKind(t *testing.T, run agentwrap.Run, timeout time.Duration, kinds ...agentwrap.EventKind) ([]agentwrap.Event, bool) {
+	t.Helper()
+	wanted := map[agentwrap.EventKind]struct{}{}
+	for _, kind := range kinds {
+		wanted[kind] = struct{}{}
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	var events []agentwrap.Event
+	for {
+		select {
+		case event, ok := <-run.Events():
+			if !ok {
+				return events, false
+			}
+			events = append(events, event)
+			if _, ok := wanted[event.Kind()]; ok {
+				return events, true
+			}
+		case <-timer.C:
+			return events, false
+		}
+	}
+}
+
 func smokeModel(t *testing.T) string {
 	t.Helper()
 	model := os.Getenv("AGENTWRAP_OPENCODE_SMOKE_MODEL")
@@ -421,6 +581,16 @@ func requireEventKind(t *testing.T, events []agentwrap.Event, category agentwrap
 		}
 	}
 	t.Fatalf("missing event category %s in %#v", category, events)
+}
+
+func requirePermissionPolicyEvent(t *testing.T, events []agentwrap.Event) {
+	t.Helper()
+	for _, event := range events {
+		if event.Type == "permission.policy" && event.Kind() == agentwrap.EventPermission {
+			return
+		}
+	}
+	t.Fatalf("missing permission.policy event in:\n%s", summarizeEvents(events))
 }
 
 func requireUnsafeRawPayloads(t *testing.T, events []agentwrap.Event) {

@@ -11,6 +11,8 @@ first OpenCode adapter:
 - SDK health/preflight contracts and source-aware effective config summaries
 - runtime-neutral resilience policy execution for bounded retry, backoff,
   fallback, rate-limit handling, and per-attempt metadata
+- initialization-time permission policies with OpenCode native config
+  translation and permission audit metadata
 - lifecycle/session events plus cleanup metadata that does not overwrite the
   primary run result
 - OpenCode structured-output adapter with timeout/cancellation cleanup and
@@ -41,6 +43,25 @@ Every attempt is retained in `RunMetadata.Attempts`, and policy decisions are
 recorded in `RunMetadata.Policy.Decisions`. Policy execution emits canonical
 `rate_limit`, `retry`, and `fallback` events with one logical correlation ID.
 
+## Permission Policies
+
+Callers can attach a structured `PermissionPolicy` to `RunRequest` at run
+initialization. The policy uses SDK tool classes such as `PermissionToolRead`,
+`PermissionToolEdit`, and `PermissionToolShell` with actions `allow`, `deny`,
+or `ask`.
+
+The OpenCode adapter translates supported policy fields into per-process
+`OPENCODE_CONFIG_CONTENT` permission config. Unsupported required features,
+such as path-level rules in the current subprocess adapter, fail before process
+start. Callers can opt into `PermissionUnsupportedBestEffort` when they want the
+unsupported feature recorded but not treated as blocking.
+
+Permission policy summaries, support classification, and audit records are
+reported in `RunMetadata.Permissions`. The adapter also emits a canonical
+permission event before process launch with a stable permission policy ID. Live
+OpenCode REST/SSE approval posting is not part of the current subprocess
+adapter; the native config path is the supported Sprint 7 behavior.
+
 ## Development
 
 Requires Go 1.22 or newer.
@@ -61,6 +82,8 @@ gofmt -w .
 - Health checks do not start billable agent work; uncertain provider/model/auth
   readiness is reported as unknown or degraded instead of guessed as ready.
 - Validation/repair and persistence are not implemented yet.
+- Live permission approval transport is deferred until the SDK has an OpenCode
+  server-mode adapter.
 - Policy execution is bounded and explicit; there is no global circuit breaker
   or provider-wide throttling layer yet.
 - No UltraPlan workflow logic in this SDK.

@@ -31,20 +31,18 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 	} else {
 		runCtx, cancel = context.WithCancel(ctx)
 	}
-	runID := agentwrap.RunID(fmt.Sprintf("opencode-%d", runCounter.Add(1)))
-	started := r.now()
-	spec := r.processSpec(req)
-	proc, err := r.runner.Start(runCtx, spec)
+	permissions, err := translatePermissions(req)
 	if err != nil {
 		cancel()
-		return nil, classifyStartError(err)
+		return nil, err
 	}
+	runID := agentwrap.RunID(fmt.Sprintf("opencode-%d", runCounter.Add(1)))
+	started := r.now()
 	handle := &run{
 		id:      runID,
 		req:     req,
 		ctx:     runCtx,
 		cancel:  cancel,
-		proc:    proc,
 		events:  make(chan agentwrap.Event, 32),
 		done:    make(chan struct{}),
 		started: started,
@@ -55,10 +53,23 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 			Model:       req.Model,
 		},
 		now:          r.now,
+		permissions:  permissions.metadata,
 		stderrBuffer: newLimitBuffer(r.stderrLimit),
 		stderrDone:   make(chan struct{}),
 		lifecycle:    agentwrap.StatusStarting,
 	}
+	handle.emitPermissionAudit("policy_initialized")
+	spec, err := r.processSpec(req, permissions)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	proc, err := r.runner.Start(runCtx, spec)
+	if err != nil {
+		cancel()
+		return nil, classifyStartError(err)
+	}
+	handle.proc = proc
 	handle.emitLifecycle(agentwrap.StatusRunning, "process_started")
 	go handle.captureStderr()
 	go handle.cancelOnContextDone()
@@ -96,7 +107,7 @@ func (r *Runtime) requiredPreflight(ctx context.Context, req agentwrap.RunReques
 	return nil
 }
 
-func (r *Runtime) processSpec(req agentwrap.RunRequest) processSpec {
+func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTranslation) (processSpec, error) {
 	args := []string{"run", "--format", "json"}
 	if req.WorkDir != "" {
 		args = append(args, "--dir", req.WorkDir)
@@ -115,12 +126,16 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest) processSpec {
 	}
 	args = append(args, r.extraArgs...)
 	args = append(args, req.Prompt)
+	env, err := mergeEnv(r.env, permissions.config)
+	if err != nil {
+		return processSpec{}, err
+	}
 	return processSpec{
 		Executable: r.executable,
 		Args:       args,
-		Env:        r.env,
+		Env:        env,
 		WorkDir:    req.WorkDir,
-	}
+	}, nil
 }
 
 type run struct {
@@ -151,6 +166,7 @@ type run struct {
 	warnings     []string
 	usage        agentwrap.Usage
 	rateLimit    *agentwrap.RateLimitInfo
+	permissions  agentwrap.PermissionMetadata
 	nativeTypes  map[string]int
 	categories   map[string]int
 	stderrBuffer *limitBuffer
@@ -217,6 +233,9 @@ func (r *run) run() {
 		})
 		if projected.event.SessionID == "" {
 			projected.event.SessionID = r.req.SessionID
+		}
+		if projected.event.Kind() == agentwrap.EventPermission {
+			r.permissions.Audit = append(r.permissions.Audit, permissionAuditFromEvent(projected.event))
 		}
 		r.recordEventStats(projected.event)
 		if !r.sendEvent(projected.event) {
@@ -288,16 +307,17 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 		status = agentwrap.StatusFailed
 	}
 	metadata := agentwrap.RunMetadata{
-		Context:    r.context,
-		Status:     status,
-		StartedAt:  r.started,
-		FinishedAt: r.finished,
-		Duration:   r.finished.Sub(r.started),
-		Session:    sessionMetadata(r.req, r.sessionID),
-		Cleanup:    cleanup,
-		Artifacts:  r.artifacts,
-		Warnings:   r.warnings,
-		Usage:      r.usage,
+		Context:     r.context,
+		Status:      status,
+		StartedAt:   r.started,
+		FinishedAt:  r.finished,
+		Duration:    r.finished.Sub(r.started),
+		Session:     sessionMetadata(r.req, r.sessionID),
+		Permissions: r.permissions,
+		Cleanup:     cleanup,
+		Artifacts:   r.artifacts,
+		Warnings:    r.warnings,
+		Usage:       r.usage,
 		NativeMetadata: map[string]any{
 			"stderr":                 r.stderrBuffer.String(),
 			"exit_code":              proc.ExitCode,
@@ -416,6 +436,48 @@ func (r *run) emitSession() {
 	if r.sendLocalEvent(event) {
 		r.recordEventStats(event)
 	}
+}
+
+func (r *run) emitPermissionAudit(reason string) {
+	if len(r.permissions.Audit) == 0 && len(r.permissions.Support) == 0 && r.req.Permissions == "" {
+		return
+	}
+	seq := r.nextSequence()
+	event := agentwrap.Event{
+		ID:        agentwrap.EventID(fmt.Sprintf("%s:%d", r.id, seq)),
+		RunID:     r.id,
+		SessionID: r.req.SessionID,
+		Time:      r.now(),
+		Type:      "permission.policy",
+		Payload: agentwrap.EventPayloadWithKind(agentwrap.EventPermission, agentwrap.EventPayload{
+			"turn_id":     string(r.req.TurnID),
+			"context":     r.context,
+			"reason":      reason,
+			"mode":        string(r.permissions.Mode),
+			"policy_id":   r.permissions.PolicyID,
+			"policy":      r.permissions.Policy,
+			"support":     r.permissions.Support,
+			"unsupported": r.permissions.Unsupported,
+			"audit":       r.permissions.Audit,
+		}),
+	}
+	if r.sendLocalEvent(event) {
+		r.recordEventStats(event)
+	}
+}
+
+func permissionAuditFromEvent(event agentwrap.Event) agentwrap.PermissionAudit {
+	audit := agentwrap.PermissionAudit{
+		Source:      "opencode.event",
+		Enforcement: agentwrap.PermissionEnforcementNative,
+		Reason:      "native permission event observed",
+	}
+	if event.Payload != nil {
+		if nativeType, ok := event.Payload["native_type"].(string); ok {
+			audit.Metadata = map[string]string{"native_type": nativeType}
+		}
+	}
+	return audit
 }
 
 func (r *run) nextSequence() int64 {

@@ -113,6 +113,147 @@ func TestStartRunBuildsStructuredCommand(t *testing.T) {
 	}
 }
 
+func TestStartRunInjectsPermissionConfigContent(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(
+		withProcessRunner(runner),
+		WithEnv("EXISTING=1", `OPENCODE_CONFIG_CONTENT={"provider":{"example":true},"permission":{"webfetch":"allow","bash":"allow"}}`),
+	)
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
+				agentwrap.PermissionToolRead:         agentwrap.PermissionActionAllow,
+				agentwrap.PermissionToolEdit:         agentwrap.PermissionActionDeny,
+				agentwrap.PermissionToolShell:        agentwrap.PermissionActionAsk,
+				agentwrap.PermissionToolGlob:         agentwrap.PermissionActionAllow,
+				agentwrap.PermissionToolRepoOverview: agentwrap.PermissionActionDeny,
+				agentwrap.PermissionToolDoomLoop:     agentwrap.PermissionActionAsk,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result := drainRun(t, run)
+	if result.Metadata.Permissions.Policy.Tools[agentwrap.PermissionToolShell] != agentwrap.PermissionActionAsk {
+		t.Fatalf("permission metadata = %#v", result.Metadata.Permissions)
+	}
+	if len(events) < 2 || events[0].Type != "permission.policy" || events[0].Kind() != agentwrap.EventPermission {
+		t.Fatalf("permission audit event missing: %#v", events)
+	}
+	eventPolicyID, ok := events[0].Payload["policy_id"].(string)
+	if !ok || eventPolicyID == "" || result.Metadata.Permissions.PolicyID == "" {
+		t.Fatalf("permission policy id missing: event=%#v metadata=%#v", events[0].Payload, result.Metadata.Permissions)
+	}
+	if eventPolicyID != result.Metadata.Permissions.PolicyID {
+		t.Fatalf("policy_id mismatch: event=%q metadata=%q", eventPolicyID, result.Metadata.Permissions.PolicyID)
+	}
+	if events[1].Kind() != agentwrap.EventLifecycle {
+		t.Fatalf("permission audit should precede process lifecycle event: %#v", events[:2])
+	}
+	var configValue string
+	for _, env := range runner.spec.Env {
+		if len(env) >= len("OPENCODE_CONFIG_CONTENT=") && env[:len("OPENCODE_CONFIG_CONTENT=")] == "OPENCODE_CONFIG_CONTENT=" {
+			if configValue != "" {
+				t.Fatalf("duplicate OPENCODE_CONFIG_CONTENT env: %#v", runner.spec.Env)
+			}
+			configValue = env
+		}
+	}
+	if configValue == "" {
+		t.Fatalf("OPENCODE_CONFIG_CONTENT missing from env: %#v", runner.spec.Env)
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(configValue[len("OPENCODE_CONFIG_CONTENT="):]), &config); err != nil {
+		t.Fatalf("permission config is invalid JSON: %v config=%s", err, configValue)
+	}
+	if provider, ok := config["provider"].(map[string]any); !ok || provider["example"] != true {
+		t.Fatalf("existing config was not preserved: %#v", config)
+	}
+	permission, ok := config["permission"].(map[string]any)
+	if !ok {
+		t.Fatalf("permission config missing: %#v", config)
+	}
+	wantPermission := map[string]string{
+		"read":          "allow",
+		"edit":          "deny",
+		"bash":          "ask",
+		"glob":          "allow",
+		"repo_overview": "deny",
+		"doom_loop":     "ask",
+		"webfetch":      "allow",
+	}
+	for key, want := range wantPermission {
+		if got := permission[key]; got != want {
+			t.Fatalf("permission[%s] = %#v, want %q; config=%#v", key, got, want, config)
+		}
+	}
+}
+
+func TestStartRunRejectsInvalidExistingConfigContent(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(
+		withProcessRunner(runner),
+		WithEnv("OPENCODE_CONFIG_CONTENT=not-json"),
+	)
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
+				agentwrap.PermissionToolShell: agentwrap.PermissionActionAllow,
+			},
+		},
+	})
+	var sdkErr *agentwrap.SDKError
+	if err == nil || !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("err = %#v, want configuration SDKError", err)
+	}
+	if runner.starts != 0 {
+		t.Fatalf("process starts = %d, want 0", runner.starts)
+	}
+}
+
+func TestStartRunRejectsRequiredUnsupportedPathPermission(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			PathRules: []agentwrap.PermissionPathRule{{Path: "/tmp/outside", Action: agentwrap.PermissionActionDeny}},
+		},
+	})
+	if err == nil {
+		t.Fatal("StartRun error = nil, want unsupported permission error")
+	}
+	var sdkErr *agentwrap.SDKError
+	if !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("error = %#v, want configuration SDKError", err)
+	}
+	if runner.starts != 0 {
+		t.Fatalf("process starts = %d, want 0", runner.starts)
+	}
+}
+
+func TestStartRunAllowsBestEffortUnsupportedPathPermission(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			UnsupportedBehavior: agentwrap.PermissionUnsupportedBestEffort,
+			PathRules:           []agentwrap.PermissionPathRule{{Path: "/tmp/outside", Action: agentwrap.PermissionActionDeny}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if len(result.Metadata.Permissions.Unsupported) != 1 {
+		t.Fatalf("unsupported metadata = %#v", result.Metadata.Permissions.Unsupported)
+	}
+}
+
 func TestPolicyRunnerWrapsOpenCodeRuntimeWithoutAdapterRetry(t *testing.T) {
 	runner := &fakeRunner{procs: []process{
 		&fakeProcess{stdout: readFixture(t, "normal.ndjson"), stderr: "temporary", result: processResult{ExitCode: 1}},
