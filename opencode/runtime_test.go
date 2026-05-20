@@ -117,15 +117,18 @@ func TestStartRunInjectsPermissionConfigContent(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
 	rt := NewRuntime(
 		withProcessRunner(runner),
-		WithEnv("EXISTING=1", "OPENCODE_CONFIG_CONTENT={\"permission\":{\"bash\":\"allow\"}}"),
+		WithEnv("EXISTING=1", `OPENCODE_CONFIG_CONTENT={"provider":{"example":true},"permission":{"webfetch":"allow","bash":"allow"}}`),
 	)
 	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
 		Prompt: "hello",
 		PermissionPolicy: &agentwrap.PermissionPolicy{
 			Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
-				agentwrap.PermissionToolRead:  agentwrap.PermissionActionAllow,
-				agentwrap.PermissionToolEdit:  agentwrap.PermissionActionDeny,
-				agentwrap.PermissionToolShell: agentwrap.PermissionActionAsk,
+				agentwrap.PermissionToolRead:         agentwrap.PermissionActionAllow,
+				agentwrap.PermissionToolEdit:         agentwrap.PermissionActionDeny,
+				agentwrap.PermissionToolShell:        agentwrap.PermissionActionAsk,
+				agentwrap.PermissionToolGlob:         agentwrap.PermissionActionAllow,
+				agentwrap.PermissionToolRepoOverview: agentwrap.PermissionActionDeny,
+				agentwrap.PermissionToolDoomLoop:     agentwrap.PermissionActionAsk,
 			},
 		},
 	})
@@ -157,8 +160,53 @@ func TestStartRunInjectsPermissionConfigContent(t *testing.T) {
 	if configValue == "" {
 		t.Fatalf("OPENCODE_CONFIG_CONTENT missing from env: %#v", runner.spec.Env)
 	}
-	if !contains(configValue, `"read":"allow"`) || !contains(configValue, `"edit":"deny"`) || !contains(configValue, `"bash":"ask"`) {
-		t.Fatalf("permission config = %s", configValue)
+	var config map[string]any
+	if err := json.Unmarshal([]byte(configValue[len("OPENCODE_CONFIG_CONTENT="):]), &config); err != nil {
+		t.Fatalf("permission config is invalid JSON: %v config=%s", err, configValue)
+	}
+	if provider, ok := config["provider"].(map[string]any); !ok || provider["example"] != true {
+		t.Fatalf("existing config was not preserved: %#v", config)
+	}
+	permission, ok := config["permission"].(map[string]any)
+	if !ok {
+		t.Fatalf("permission config missing: %#v", config)
+	}
+	wantPermission := map[string]string{
+		"read":          "allow",
+		"edit":          "deny",
+		"bash":          "ask",
+		"glob":          "allow",
+		"repo_overview": "deny",
+		"doom_loop":     "ask",
+		"webfetch":      "allow",
+	}
+	for key, want := range wantPermission {
+		if got := permission[key]; got != want {
+			t.Fatalf("permission[%s] = %#v, want %q; config=%#v", key, got, want, config)
+		}
+	}
+}
+
+func TestStartRunRejectsInvalidExistingConfigContent(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(
+		withProcessRunner(runner),
+		WithEnv("OPENCODE_CONFIG_CONTENT=not-json"),
+	)
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
+				agentwrap.PermissionToolShell: agentwrap.PermissionActionAllow,
+			},
+		},
+	})
+	var sdkErr *agentwrap.SDKError
+	if err == nil || !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("err = %#v, want configuration SDKError", err)
+	}
+	if runner.starts != 0 {
+		t.Fatalf("process starts = %d, want 0", runner.starts)
 	}
 }
 

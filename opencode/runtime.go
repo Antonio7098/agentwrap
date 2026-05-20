@@ -59,7 +59,11 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 		lifecycle:    agentwrap.StatusStarting,
 	}
 	handle.emitPermissionAudit("policy_initialized")
-	spec := r.processSpec(req, permissions)
+	spec, err := r.processSpec(req, permissions)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	proc, err := r.runner.Start(runCtx, spec)
 	if err != nil {
 		cancel()
@@ -103,7 +107,7 @@ func (r *Runtime) requiredPreflight(ctx context.Context, req agentwrap.RunReques
 	return nil
 }
 
-func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTranslation) processSpec {
+func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTranslation) (processSpec, error) {
 	args := []string{"run", "--format", "json"}
 	if req.WorkDir != "" {
 		args = append(args, "--dir", req.WorkDir)
@@ -122,12 +126,16 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTr
 	}
 	args = append(args, r.extraArgs...)
 	args = append(args, req.Prompt)
+	env, err := mergeEnv(r.env, permissions.config)
+	if err != nil {
+		return processSpec{}, err
+	}
 	return processSpec{
 		Executable: r.executable,
 		Args:       args,
-		Env:        mergeEnv(r.env, permissions.env),
+		Env:        env,
 		WorkDir:    req.WorkDir,
-	}
+	}, nil
 }
 
 type run struct {

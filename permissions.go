@@ -25,6 +25,7 @@ const (
 	PermissionToolRead              PermissionTool = "read"
 	PermissionToolEdit              PermissionTool = "edit"
 	PermissionToolShell             PermissionTool = "shell"
+	PermissionToolGlob              PermissionTool = "glob"
 	PermissionToolSearch            PermissionTool = "search"
 	PermissionToolList              PermissionTool = "list"
 	PermissionToolTask              PermissionTool = "task"
@@ -33,7 +34,9 @@ const (
 	PermissionToolWebFetch          PermissionTool = "web_fetch"
 	PermissionToolWebSearch         PermissionTool = "web_search"
 	PermissionToolRepoClone         PermissionTool = "repo_clone"
+	PermissionToolRepoOverview      PermissionTool = "repo_overview"
 	PermissionToolExternalDirectory PermissionTool = "external_directory"
+	PermissionToolDoomLoop          PermissionTool = "doom_loop"
 	PermissionToolLanguageServer    PermissionTool = "language_server"
 	PermissionToolSkill             PermissionTool = "skill"
 )
@@ -174,7 +177,7 @@ func validatePermissionAction(action PermissionAction, field string) *SDKError {
 	case PermissionActionDefault, PermissionActionAllow, PermissionActionDeny, PermissionActionAsk:
 		return nil
 	default:
-		return permissionConfigError(fmt.Sprintf("%s must be allow, deny, or ask", field))
+		return permissionConfigError(fmt.Sprintf("%s must be default, allow, deny, or ask", field))
 	}
 }
 

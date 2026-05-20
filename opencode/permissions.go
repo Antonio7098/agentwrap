@@ -14,6 +14,7 @@ var opencodePermissionTools = map[agentwrap.PermissionTool]string{
 	agentwrap.PermissionToolRead:              "read",
 	agentwrap.PermissionToolEdit:              "edit",
 	agentwrap.PermissionToolShell:             "bash",
+	agentwrap.PermissionToolGlob:              "glob",
 	agentwrap.PermissionToolSearch:            "grep",
 	agentwrap.PermissionToolList:              "list",
 	agentwrap.PermissionToolTask:              "task",
@@ -22,13 +23,15 @@ var opencodePermissionTools = map[agentwrap.PermissionTool]string{
 	agentwrap.PermissionToolWebFetch:          "webfetch",
 	agentwrap.PermissionToolWebSearch:         "websearch",
 	agentwrap.PermissionToolRepoClone:         "repo_clone",
+	agentwrap.PermissionToolRepoOverview:      "repo_overview",
 	agentwrap.PermissionToolExternalDirectory: "external_directory",
+	agentwrap.PermissionToolDoomLoop:          "doom_loop",
 	agentwrap.PermissionToolLanguageServer:    "lsp",
 	agentwrap.PermissionToolSkill:             "skill",
 }
 
 type permissionTranslation struct {
-	env      []string
+	config   map[string]string
 	metadata agentwrap.PermissionMetadata
 }
 
@@ -92,11 +95,7 @@ func translatePermissions(req agentwrap.RunRequest) (permissionTranslation, erro
 	if len(permissionConfig) == 0 {
 		return permissionTranslation{metadata: metadata}, nil
 	}
-	content, err := json.Marshal(map[string]any{"permission": permissionConfig})
-	if err != nil {
-		return permissionTranslation{}, agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode permissions", "OpenCode permission config could not be encoded", err)
-	}
-	return permissionTranslation{env: []string{opencodeConfigContentEnv + string(content)}, metadata: metadata}, nil
+	return permissionTranslation{config: permissionConfig, metadata: metadata}, nil
 }
 
 func unsupportedFeature(feature string, behavior agentwrap.PermissionUnsupportedBehavior, reason string) agentwrap.PermissionFeatureSupport {
@@ -111,16 +110,37 @@ func unsupportedPermissionError(feature agentwrap.PermissionFeatureSupport) *age
 	return agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode permissions", feature.Reason, nil, agentwrap.WithDebugDetail(feature.Feature))
 }
 
-func mergeEnv(base, extra []string) []string {
-	if len(extra) == 0 {
-		return append([]string(nil), base...)
+func mergeEnv(base []string, permissionConfig map[string]string) ([]string, error) {
+	if len(permissionConfig) == 0 {
+		return append([]string(nil), base...), nil
 	}
-	out := make([]string, 0, len(base)+len(extra))
+	out := make([]string, 0, len(base)+1)
+	existing := map[string]any{}
 	for _, value := range base {
 		if strings.HasPrefix(value, opencodeConfigContentEnv) {
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(value, opencodeConfigContentEnv)), &existing); err != nil {
+				return nil, agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode permissions", "existing OPENCODE_CONFIG_CONTENT is not valid JSON", err)
+			}
 			continue
 		}
 		out = append(out, value)
 	}
-	return append(out, extra...)
+	permissionAny, ok := existing["permission"]
+	permission := map[string]any{}
+	if ok {
+		var castOK bool
+		permission, castOK = permissionAny.(map[string]any)
+		if !castOK {
+			return nil, agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode permissions", "existing OPENCODE_CONFIG_CONTENT permission value must be an object", nil)
+		}
+	}
+	for key, value := range permissionConfig {
+		permission[key] = value
+	}
+	existing["permission"] = permission
+	content, err := json.Marshal(existing)
+	if err != nil {
+		return nil, agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode permissions", "OpenCode permission config could not be encoded", err)
+	}
+	return append(out, opencodeConfigContentEnv+string(content)), nil
 }
