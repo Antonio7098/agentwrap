@@ -14,6 +14,9 @@ first OpenCode adapter:
 - runtime-neutral output validation for files, directories, artifact
   references, Markdown template files, JSON shape checks, metadata fields, and
   caller-defined validators
+- runtime-neutral observability records, ordered event records, optional event
+  sinks, optional run stores, active/completed inspection APIs, and a
+  deterministic in-memory reference store
 - bounded validation repair attempts that inherit the original session,
   sandbox, runtime/model, and permission posture by default
 - initialization-time permission policies with OpenCode native config
@@ -88,6 +91,31 @@ permission event before process launch with a stable permission policy ID. Live
 OpenCode REST/SSE approval posting is not part of the current subprocess
 adapter; the native config path is the supported Sprint 7 behavior.
 
+## Observability And Persistence Hooks
+
+`ObservingRuntime` wraps any `Runtime` without changing adapter code. It drains
+canonical events, forwards them to the caller, assigns per-run sequence numbers,
+updates active run projections, and merges final `RunResult` metadata into a
+completed `RunRecord`.
+
+Callers can attach best-effort or required `EventSink` implementations and an
+optional `RunStore`. Required sink failures are returned from `Wait` when the
+primary runtime outcome succeeded; best-effort failures are recorded in the run
+record without replacing the primary outcome. `MemoryRunStore` is a deterministic
+reference implementation for tests and product-local inspection, not a durable
+backend choice.
+
+Run records preserve existing metadata types for attempts, retry/fallback
+policy, sessions, permission audit, validation, repair, cleanup, artifacts,
+usage, estimated cost, throughput, warnings, errors, and native metadata. Usage
+token values keep nil/unknown semantics; unknown values are not converted to
+zero. Artifact records receive producer metadata for source run, runtime,
+provider, and model when available.
+
+Unsafe native raw payload bytes are not persisted by default. Event records keep
+safe canonical payload fields plus raw presence/safety/source/encoding and an
+omission reason when unsafe bytes were dropped.
+
 ## Development
 
 Requires Go 1.22 or newer.
@@ -107,7 +135,8 @@ gofmt -w .
 - Real OpenCode invocation remains opt-in through the gated smoke test.
 - Health checks do not start billable agent work; uncertain provider/model/auth
   readiness is reported as unknown or degraded instead of guessed as ready.
-- Persistence hooks are not implemented yet.
+- Durable persistence backend selection is caller-owned; the SDK ships only the
+  `RunStore` interface and in-memory reference store.
 - Live permission approval transport is deferred until the SDK has an OpenCode
   server-mode adapter.
 - Policy execution is bounded and explicit; there is no global circuit breaker
