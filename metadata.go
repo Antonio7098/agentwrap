@@ -27,6 +27,8 @@ type RunMetadata struct {
 	Session        SessionMetadata
 	Permissions    PermissionMetadata
 	Cleanup        CleanupMetadata
+	Validation     ValidationMetadata
+	Repair         RepairMetadata
 	Artifacts      []ArtifactRef
 	Warnings       []string
 	Errors         []SDKError
@@ -113,6 +115,47 @@ type CleanupMetadata struct {
 	Completed bool
 	Failed    bool
 	Error     *SDKError
+}
+
+// ValidationMetadata records validator outcomes for the final logical run.
+type ValidationMetadata struct {
+	Configured bool
+	Final      ValidationResult
+	History    []ValidationResult
+}
+
+// RepairMetadata records bounded validation repair attempts.
+type RepairMetadata struct {
+	Configured             bool
+	Attempted              bool
+	MaxAttempts            int
+	Attempts               []RepairAttemptSummary
+	Exhausted              bool
+	ExhaustedReason        string
+	PermissionPolicyID     string
+	PermissionDenied       bool
+	UnsupportedSameSession bool
+}
+
+// RepairAttemptSummary records one repair attempt without embedding prompts or
+// large output content.
+type RepairAttemptSummary struct {
+	Attempt              int
+	RunID                RunID
+	ParentRunID          RunID
+	Request              AttemptRequest
+	Status               RunStatus
+	StartedAt            time.Time
+	FinishedAt           time.Time
+	Duration             time.Duration
+	Session              SessionMetadata
+	Permissions          PermissionMetadata
+	Validation           ValidationResult
+	ErrorCategory        ErrorCategory
+	Error                *SDKError
+	UnsupportedSession   bool
+	PermissionPolicyID   string
+	PolicyDecisionReason string
 }
 
 // SessionAction identifies the retained-session behavior requested by a caller.

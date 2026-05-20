@@ -19,6 +19,13 @@
 // runtime configuration, classify unsupported features before launch, and record
 // safe permission audit metadata in RunMetadata.Permissions.
 //
+// ValidatingRuntime wraps any Runtime with output validation and bounded repair.
+// Built-in expectations check durable files, directories, artifact references,
+// Markdown artifacts against template files, JSON well-formedness and minimal
+// required fields, metadata fields, and caller-defined validators. Validation
+// and repair facts are emitted as canonical validation events and stored in
+// RunMetadata.Validation and RunMetadata.Repair.
+//
 // RunResult.Status preserves the primary run outcome. Cleanup of owned runtime
 // resources is reported separately through RunMetadata.Cleanup and lifecycle
 // events so a successful or failed run can still expose cleanup diagnostics.

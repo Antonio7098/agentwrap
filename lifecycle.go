@@ -1,16 +1,17 @@
 package agentwrap
 
-// RunStatus is the small caller-visible status vocabulary for a runtime run.
-// Recovery work such as retry, fallback, validation, repair, and cleanup is
-// reported as events or metadata, not as core run states.
+// RunStatus is the caller-visible status vocabulary for runtime and wrapper
+// orchestration phases.
 type RunStatus string
 
 const (
-	StatusStarting  RunStatus = "starting"
-	StatusRunning   RunStatus = "running"
-	StatusCompleted RunStatus = "completed"
-	StatusFailed    RunStatus = "failed"
-	StatusCancelled RunStatus = "cancelled"
+	StatusStarting   RunStatus = "starting"
+	StatusRunning    RunStatus = "running"
+	StatusValidating RunStatus = "validating"
+	StatusRepairing  RunStatus = "repairing"
+	StatusCompleted  RunStatus = "completed"
+	StatusFailed     RunStatus = "failed"
+	StatusCancelled  RunStatus = "cancelled"
 )
 
 // Terminal reports whether the status ends a run from a caller perspective.

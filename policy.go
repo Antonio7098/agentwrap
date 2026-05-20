@@ -35,14 +35,6 @@ type PolicyContext struct {
 	Metadata        map[string]string
 }
 
-// ValidationResult is intentionally minimal until output validation is
-// implemented. It gives policies a stable field without defining validators.
-type ValidationResult struct {
-	Passed bool
-	Errors []SDKError
-	Native map[string]any
-}
-
 // PolicyDecisionKind identifies the next action selected by a policy.
 type PolicyDecisionKind string
 
@@ -450,6 +442,7 @@ func (r *policyRun) execute() {
 			CurrentResult:   last,
 			Err:             lastErr,
 			RateLimit:       rateLimitFromResult(last),
+			Validation:      validationFromResult(last),
 			StartedAt:       r.started,
 			Elapsed:         r.now().Sub(r.started),
 			Metadata:        cloneStringMap(r.original.Metadata),
@@ -866,6 +859,14 @@ func rateLimitFromResult(result RunResult) *RateLimitInfo {
 		}
 	}
 	return nil
+}
+
+func validationFromResult(result RunResult) *ValidationResult {
+	if !result.Metadata.Validation.Configured {
+		return nil
+	}
+	validation := result.Metadata.Validation.Final
+	return &validation
 }
 
 func ensureSDKError(err error, operation string) *SDKError {
