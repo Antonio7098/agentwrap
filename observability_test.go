@@ -209,6 +209,62 @@ func TestRunEventRecordPayloadIsDeepCloned(t *testing.T) {
 	}
 }
 
+func TestObservingRuntimeDoesNotBlockOnUnconsumedOuterEvents(t *testing.T) {
+	store := agentwrap.NewMemoryRunStore()
+	events := make([]agentwrap.Event, 100)
+	for i := range events {
+		events[i] = agentwrap.Event{
+			ID:    agentwrap.EventID(fmt.Sprintf("event-%d", i)),
+			RunID: "slow-consumer-run",
+			Type:  "progress",
+			Payload: agentwrap.EventPayloadWithKind(agentwrap.EventProgress, agentwrap.EventPayload{
+				"index": i,
+			}),
+		}
+	}
+	now := time.Now().UTC()
+	runtime := agentwrap.ObservingRuntime{
+		Runtime: staticRuntime{run: &staticRun{
+			id:     "slow-consumer-run",
+			events: events,
+			result: agentwrap.RunResult{
+				RunID:      "slow-consumer-run",
+				Status:     agentwrap.StatusCompleted,
+				StartedAt:  now.Add(-time.Second),
+				FinishedAt: now,
+			},
+		}},
+		Store: store,
+	}
+	run, err := runtime.StartRun(context.Background(), agentwrap.RunRequest{})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := run.Wait(waitCtx)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	record, ok, err := store.GetCompletedRun(context.Background(), result.RunID)
+	if err != nil || !ok {
+		t.Fatalf("completed lookup ok=%v err=%v", ok, err)
+	}
+	if record.EventCount != int64(len(events)) {
+		t.Fatalf("event count = %d, want %d", record.EventCount, len(events))
+	}
+	if record.DroppedEventCount == 0 {
+		t.Fatal("expected dropped outer events for unconsumed event channel")
+	}
+	storedEvents, err := store.ListRunEvents(context.Background(), result.RunID)
+	if err != nil {
+		t.Fatalf("stored events: %v", err)
+	}
+	if len(storedEvents) != len(events) {
+		t.Fatalf("stored event count = %d, want %d", len(storedEvents), len(events))
+	}
+}
+
 func TestObservingRuntimeRequiredSinkFailureChangesWaitError(t *testing.T) {
 	sinkErr := errors.New("sink down")
 	runtime := agentwrap.ObservingRuntime{

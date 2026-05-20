@@ -255,6 +255,8 @@ func (r *observedRun) forward() {
 		case <-r.ctx.Done():
 			return
 		case r.events <- event:
+		default:
+			r.recordDroppedEvent()
 		}
 	}
 }
@@ -403,6 +405,12 @@ func (r *observedRun) recordFailure(operation, name string, required bool, err e
 		r.record.SinkFailures = append(r.record.SinkFailures, failure)
 	}
 	r.record.Warnings = append(r.record.Warnings, fmt.Sprintf("%s %q failed: %s", operation, name, err.Error()))
+}
+
+func (r *observedRun) recordDroppedEvent() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.record.DroppedEventCount++
 }
 
 // MemoryRunStore is a deterministic in-memory reference RunStore.
