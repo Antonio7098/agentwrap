@@ -25,6 +25,7 @@ type RunMetadata struct {
 	FinishedAt     time.Time
 	Duration       time.Duration
 	Session        SessionMetadata
+	Permissions    PermissionMetadata
 	Cleanup        CleanupMetadata
 	Artifacts      []ArtifactRef
 	Warnings       []string

@@ -113,6 +113,95 @@ func TestStartRunBuildsStructuredCommand(t *testing.T) {
 	}
 }
 
+func TestStartRunInjectsPermissionConfigContent(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(
+		withProcessRunner(runner),
+		WithEnv("EXISTING=1", "OPENCODE_CONFIG_CONTENT={\"permission\":{\"bash\":\"allow\"}}"),
+	)
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
+				agentwrap.PermissionToolRead:  agentwrap.PermissionActionAllow,
+				agentwrap.PermissionToolEdit:  agentwrap.PermissionActionDeny,
+				agentwrap.PermissionToolShell: agentwrap.PermissionActionAsk,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result := drainRun(t, run)
+	if result.Metadata.Permissions.Policy.Tools[agentwrap.PermissionToolShell] != agentwrap.PermissionActionAsk {
+		t.Fatalf("permission metadata = %#v", result.Metadata.Permissions)
+	}
+	if len(events) < 2 || events[0].Type != "permission.policy" || events[0].Kind() != agentwrap.EventPermission {
+		t.Fatalf("permission audit event missing: %#v", events)
+	}
+	if events[0].Payload["policy_id"] == "" || result.Metadata.Permissions.PolicyID == "" {
+		t.Fatalf("permission policy id missing: event=%#v metadata=%#v", events[0].Payload, result.Metadata.Permissions)
+	}
+	if events[1].Kind() != agentwrap.EventLifecycle {
+		t.Fatalf("permission audit should precede process lifecycle event: %#v", events[:2])
+	}
+	var configValue string
+	for _, env := range runner.spec.Env {
+		if len(env) >= len("OPENCODE_CONFIG_CONTENT=") && env[:len("OPENCODE_CONFIG_CONTENT=")] == "OPENCODE_CONFIG_CONTENT=" {
+			if configValue != "" {
+				t.Fatalf("duplicate OPENCODE_CONFIG_CONTENT env: %#v", runner.spec.Env)
+			}
+			configValue = env
+		}
+	}
+	if configValue == "" {
+		t.Fatalf("OPENCODE_CONFIG_CONTENT missing from env: %#v", runner.spec.Env)
+	}
+	if !contains(configValue, `"read":"allow"`) || !contains(configValue, `"edit":"deny"`) || !contains(configValue, `"bash":"ask"`) {
+		t.Fatalf("permission config = %s", configValue)
+	}
+}
+
+func TestStartRunRejectsRequiredUnsupportedPathPermission(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			PathRules: []agentwrap.PermissionPathRule{{Path: "/tmp/outside", Action: agentwrap.PermissionActionDeny}},
+		},
+	})
+	if err == nil {
+		t.Fatal("StartRun error = nil, want unsupported permission error")
+	}
+	var sdkErr *agentwrap.SDKError
+	if !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("error = %#v, want configuration SDKError", err)
+	}
+	if runner.starts != 0 {
+		t.Fatalf("process starts = %d, want 0", runner.starts)
+	}
+}
+
+func TestStartRunAllowsBestEffortUnsupportedPathPermission(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			UnsupportedBehavior: agentwrap.PermissionUnsupportedBestEffort,
+			PathRules:           []agentwrap.PermissionPathRule{{Path: "/tmp/outside", Action: agentwrap.PermissionActionDeny}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if len(result.Metadata.Permissions.Unsupported) != 1 {
+		t.Fatalf("unsupported metadata = %#v", result.Metadata.Permissions.Unsupported)
+	}
+}
+
 func TestPolicyRunnerWrapsOpenCodeRuntimeWithoutAdapterRetry(t *testing.T) {
 	runner := &fakeRunner{procs: []process{
 		&fakeProcess{stdout: readFixture(t, "normal.ndjson"), stderr: "temporary", result: processResult{ExitCode: 1}},

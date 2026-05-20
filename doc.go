@@ -14,6 +14,11 @@
 // report their native attempt outcomes directly; policy execution records every
 // attempt and emits canonical retry, fallback, and rate-limit events.
 //
+// PermissionPolicy lets callers choose the permission posture when a run is
+// initialized. Adapters translate supported SDK permission tools to native
+// runtime configuration, classify unsupported features before launch, and record
+// safe permission audit metadata in RunMetadata.Permissions.
+//
 // RunResult.Status preserves the primary run outcome. Cleanup of owned runtime
 // resources is reported separately through RunMetadata.Cleanup and lifecycle
 // events so a successful or failed run can still expose cleanup diagnostics.
