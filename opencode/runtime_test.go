@@ -142,8 +142,12 @@ func TestStartRunInjectsPermissionConfigContent(t *testing.T) {
 	if len(events) < 2 || events[0].Type != "permission.policy" || events[0].Kind() != agentwrap.EventPermission {
 		t.Fatalf("permission audit event missing: %#v", events)
 	}
-	if events[0].Payload["policy_id"] == "" || result.Metadata.Permissions.PolicyID == "" {
+	eventPolicyID, ok := events[0].Payload["policy_id"].(string)
+	if !ok || eventPolicyID == "" || result.Metadata.Permissions.PolicyID == "" {
 		t.Fatalf("permission policy id missing: event=%#v metadata=%#v", events[0].Payload, result.Metadata.Permissions)
+	}
+	if eventPolicyID != result.Metadata.Permissions.PolicyID {
+		t.Fatalf("policy_id mismatch: event=%q metadata=%q", eventPolicyID, result.Metadata.Permissions.PolicyID)
 	}
 	if events[1].Kind() != agentwrap.EventLifecycle {
 		t.Fatalf("permission audit should precede process lifecycle event: %#v", events[:2])
