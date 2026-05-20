@@ -169,6 +169,33 @@ func TestValidatingRuntimePermissionDeniedDuringRepair(t *testing.T) {
 	}
 }
 
+func TestValidatingRuntimeCancellationDuringValidation(t *testing.T) {
+	cancelOnValidate := ValidatorFunc(func(ctx context.Context, _ ValidationContext) ValidationCheck {
+		if cancel, ok := ctx.Value(cancelContextKey{}).(context.CancelFunc); ok {
+			cancel()
+		}
+		return ValidationCheck{ExpectationID: "custom", Kind: ExpectationCustom, Passed: true}
+	})
+	inner := &validationScriptRuntime{results: []validationScriptResult{{}}}
+	runner := ValidatingRuntime{Runtime: inner, Spec: ValidationSpec{Validators: []Validator{cancelOnValidate}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = context.WithValue(ctx, cancelContextKey{}, context.CancelFunc(cancel))
+	run, err := runner.StartRun(ctx, RunRequest{WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	result, err := run.Wait(context.Background())
+	if err == nil {
+		t.Fatal("Wait error = nil, want cancellation")
+	}
+	if result.Err == nil || result.Err.Category != ErrorCancellation {
+		t.Fatalf("error = %#v, want cancellation", result.Err)
+	}
+	if len(result.Metadata.Repair.Attempts) != 0 {
+		t.Fatalf("repair attempts = %#v, want none after validation cancellation", result.Metadata.Repair.Attempts)
+	}
+}
+
 func TestPolicyContextReceivesValidationResult(t *testing.T) {
 	inner := &validationScriptRuntime{results: []validationScriptResult{{}}}
 	validating := ValidatingRuntime{Runtime: inner, Spec: ValidationSpec{Expectations: []ValidationExpectation{{ID: "out", Kind: ExpectationFile, Path: "missing.txt"}}}}
@@ -206,6 +233,46 @@ func TestValidatingRuntimeUnsupportedSameSessionRepair(t *testing.T) {
 	}
 	if !result.Metadata.Repair.UnsupportedSameSession {
 		t.Fatalf("repair metadata = %#v, want unsupported same session", result.Metadata.Repair)
+	}
+	if result.Metadata.Repair.Attempts[0].Status != StatusFailed || result.Metadata.Repair.Attempts[0].ErrorCategory != ErrorRepairExhausted {
+		t.Fatalf("repair attempt = %#v, want failed repair-exhausted summary", result.Metadata.Repair.Attempts[0])
+	}
+}
+
+func TestValidatingRuntimeFreshSessionFallbackAfterUnsupportedSameSessionRepair(t *testing.T) {
+	dir := t.TempDir()
+	inner := &validationScriptRuntime{onStart: func(start int, req RunRequest) {
+		if start == 3 {
+			mustWriteFile(t, filepath.Join(dir, "out.txt"), "fixed")
+		}
+	}, results: []validationScriptResult{
+		{},
+		{session: SessionMetadata{RequestedAction: SessionActionContinue, Relationship: SessionRelationshipUnsupported, UnsupportedReason: "continue unsupported"}},
+		{session: SessionMetadata{RequestedAction: SessionActionFresh, Relationship: SessionRelationshipFresh}},
+	}}
+	runner := ValidatingRuntime{Runtime: inner, Spec: ValidationSpec{
+		Expectations: []ValidationExpectation{{ID: "out", Kind: ExpectationFile, Path: "out.txt"}},
+		Repair:       RepairConfig{MaxAttempts: 1, AllowFreshSessionFallback: true},
+	}}
+	run, err := runner.StartRun(context.Background(), RunRequest{WorkDir: dir, SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	result, err := run.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if result.Status != StatusCompleted {
+		t.Fatalf("status = %s, want completed", result.Status)
+	}
+	if len(inner.requests) != 3 || inner.requests[2].SessionAction != SessionActionFresh {
+		t.Fatalf("requests = %#v, want fresh fallback repair", inner.requests)
+	}
+	if !result.Metadata.Repair.Attempts[0].UnsupportedSession {
+		t.Fatalf("repair attempt = %#v, want unsupported-session fallback recorded", result.Metadata.Repair.Attempts[0])
+	}
+	if !result.Metadata.Repair.Attempts[0].Validation.Passed {
+		t.Fatalf("repair validation = %#v, want passed validation recorded", result.Metadata.Repair.Attempts[0].Validation)
 	}
 }
 
@@ -268,7 +335,14 @@ func (r *validationScriptRuntime) StartRun(ctx context.Context, req RunRequest) 
 	if start-1 < len(r.results) {
 		result = r.results[start-1]
 	}
-	return &validationScriptRun{id: RunID("validation-script-" + string(rune('0'+start))), req: req, result: result, events: make(chan Event), done: make(chan struct{})}, nil
+	return &validationScriptRun{
+		id:       RunID("validation-script-" + string(rune('0'+start))),
+		req:      req,
+		startCtx: ctx,
+		result:   result,
+		events:   make(chan Event),
+		done:     make(chan struct{}),
+	}, nil
 }
 
 func (r *validationScriptRuntime) Capabilities(context.Context) (Capabilities, error) {
@@ -282,12 +356,13 @@ type validationScriptResult struct {
 }
 
 type validationScriptRun struct {
-	id     RunID
-	req    RunRequest
-	result validationScriptResult
-	events chan Event
-	done   chan struct{}
-	once   sync.Once
+	id       RunID
+	req      RunRequest
+	startCtx context.Context
+	result   validationScriptResult
+	events   chan Event
+	done     chan struct{}
+	once     sync.Once
 }
 
 func (r *validationScriptRun) ID() RunID { return r.id }
@@ -299,7 +374,12 @@ func (r *validationScriptRun) Events() <-chan Event {
 
 func (r *validationScriptRun) Wait(ctx context.Context) (RunResult, error) {
 	r.start()
-	<-r.done
+	select {
+	case <-r.done:
+	case <-ctx.Done():
+		sdkErr := NewError(ErrorCancellation, "validation script", "cancelled", ctx.Err())
+		return RunResult{RunID: r.id, Status: StatusCancelled, Err: sdkErr}, sdkErr
+	}
 	if err := ctx.Err(); err != nil {
 		sdkErr := NewError(ErrorCancellation, "validation script", "cancelled", err)
 		return RunResult{RunID: r.id, Status: StatusCancelled, Err: sdkErr}, sdkErr
@@ -336,11 +416,13 @@ func (r *validationScriptRun) start() {
 			defer close(r.events)
 			defer close(r.done)
 			if r.result.wait != nil {
-				r.result.wait(context.Background())
+				r.result.wait(r.startCtx)
 			}
 		}()
 	})
 }
+
+type cancelContextKey struct{}
 
 func collectValidationEvents(run Run) []Event {
 	events := []Event{}

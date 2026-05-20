@@ -204,7 +204,7 @@ type validationRun struct {
 	current Run
 	result  RunResult
 	waitErr error
-	seq     int64
+	seq     atomic.Int64
 }
 
 func (r *validationRun) ID() RunID { return r.id }
@@ -251,7 +251,20 @@ func (r *validationRun) execute() {
 	history := []ValidationResult{}
 	repairSummaries := []RepairAttemptSummary{}
 	for attempt := 0; ; attempt++ {
-		validation := r.validate(req, result)
+		fromStatus := StatusCompleted
+		if attempt > 0 {
+			fromStatus = StatusRepairing
+		}
+		validation, validationErr := r.validate(req, result, fromStatus)
+		if validationErr != nil {
+			result.Status = statusForError(validationErr)
+			result.Err = validationErr
+			r.finish(withValidationMetadata(result, r.spec, history, repairSummaries), validationErr)
+			return
+		}
+		if attempt > 0 && len(repairSummaries) >= attempt {
+			repairSummaries[attempt-1].Validation = validation
+		}
 		history = append(history, validation)
 		result = withValidationMetadata(result, r.spec, history, repairSummaries)
 		if validation.Passed {
@@ -310,10 +323,14 @@ func (r *validationRun) startAndWait(req RunRequest) (RunResult, error) {
 	return result, nil
 }
 
-func (r *validationRun) validate(req RunRequest, result RunResult) ValidationResult {
-	r.sendLifecycle(result, StatusCompleted, StatusValidating, "validation started")
+func (r *validationRun) validate(req RunRequest, result RunResult, from RunStatus) (ValidationResult, *SDKError) {
+	r.sendLifecycle(result, from, StatusValidating, "validation started")
 	r.sendEvent(Event{RunID: r.id, SessionID: result.SessionID, Type: "validation.started", Payload: EventPayloadWithKind(EventValidation, EventPayload{"phase": "started"})})
 	validation := ValidateRun(r.ctx, req, result, r.spec)
+	if err := contextValidationError(r.ctx.Err()); err != nil {
+		r.sendLifecycle(result, StatusValidating, StatusCancelled, "validation cancelled")
+		return validation, err
+	}
 	r.sendEvent(Event{RunID: r.id, SessionID: result.SessionID, Type: "validation.completed", Payload: EventPayloadWithKind(EventValidation, EventPayload{
 		"passed":        validation.Passed,
 		"passed_count":  validation.PassedCount,
@@ -322,7 +339,7 @@ func (r *validationRun) validate(req RunRequest, result RunResult) ValidationRes
 		"failures":      safeFailurePayload(validation.Failures),
 	})})
 	r.sendLifecycle(result, StatusValidating, StatusCompleted, "validation completed")
-	return validation
+	return validation, nil
 }
 
 func (r *validationRun) runRepair(req RunRequest, repairCtx RepairContext) (RunResult, RepairAttemptSummary, *SDKError) {
@@ -349,10 +366,24 @@ func (r *validationRun) runRepair(req RunRequest, repairCtx RepairContext) (RunR
 		summary.ErrorCategory = result.Err.Category
 	}
 	if result.Metadata.Session.Relationship == SessionRelationshipUnsupported && repairReq.SessionAction == SessionActionContinue {
-		summary.UnsupportedSession = true
-		unsupportedErr := NewError(ErrorRepairExhausted, "validation repair", "same-session repair is unsupported", nil, WithDebugDetail(result.Metadata.Session.UnsupportedReason))
-		err = unsupportedErr
-		result.Err = unsupportedErr
+		if r.spec.Repair.AllowFreshSessionFallback {
+			fallbackReq := repairReq
+			fallbackReq.SessionAction = SessionActionFresh
+			fallbackReq.SessionID = ""
+			result, err = r.startAndWait(fallbackReq)
+			summary = repairSummary(repairCtx.Attempt, r.id, fallbackReq, started, result)
+			summary.UnsupportedSession = true
+			summary.PolicyDecisionReason = "fresh session fallback after unsupported same-session repair"
+		} else {
+			summary.UnsupportedSession = true
+			unsupportedErr := NewError(ErrorRepairExhausted, "validation repair", "same-session repair is unsupported", nil, WithDebugDetail(result.Metadata.Session.UnsupportedReason))
+			err = unsupportedErr
+			result.Err = unsupportedErr
+			result.Status = StatusFailed
+			summary.Status = StatusFailed
+			summary.Error = unsupportedErr
+			summary.ErrorCategory = unsupportedErr.Category
+		}
 	}
 	if err != nil {
 		sdkErr := firstSDKError(result.Err, err)
@@ -361,6 +392,27 @@ func (r *validationRun) runRepair(req RunRequest, repairCtx RepairContext) (RunR
 	}
 	r.sendEvent(Event{RunID: r.id, SessionID: result.SessionID, Type: "repair.completed", Payload: EventPayloadWithKind(EventValidation, EventPayload{"attempt": repairCtx.Attempt})})
 	return result, summary, nil
+}
+
+func repairSummary(attempt int, parent RunID, req RunRequest, started time.Time, result RunResult) RepairAttemptSummary {
+	summary := RepairAttemptSummary{
+		Attempt:            attempt,
+		RunID:              result.RunID,
+		ParentRunID:        parent,
+		Request:            attemptRequest(req),
+		Status:             result.Status,
+		StartedAt:          firstTime(result.StartedAt, started),
+		FinishedAt:         firstTime(result.FinishedAt, time.Now().UTC()),
+		Session:            result.Metadata.Session,
+		Permissions:        result.Metadata.Permissions,
+		Error:              result.Err,
+		PermissionPolicyID: permissionPolicyID(req.PermissionPolicy),
+	}
+	summary.Duration = summary.FinishedAt.Sub(summary.StartedAt)
+	if result.Err != nil {
+		summary.ErrorCategory = result.Err.Category
+	}
+	return summary
 }
 
 func (r *validationRun) shouldRepair(ctx RepairContext) bool {
@@ -394,13 +446,15 @@ func (r *validationRun) forwardEvents(events <-chan Event) {
 }
 
 func (r *validationRun) sendLifecycle(result RunResult, from, to RunStatus, reason string) {
-	r.sendEvent(LifecycleEvent(r.id, result.SessionID, result.TurnID, result.Metadata.Context, r.seq+1, r.now(), from, to, reason))
+	event := LifecycleEvent(r.id, result.SessionID, result.TurnID, result.Metadata.Context, 0, r.now(), from, to, reason)
+	event.ID = ""
+	r.sendEvent(event)
 }
 
 func (r *validationRun) sendEvent(event Event) {
-	r.seq++
+	seq := r.seq.Add(1)
 	if event.ID == "" {
-		event.ID = EventID(fmt.Sprintf("%s-event-%d", r.id, r.seq))
+		event.ID = EventID(fmt.Sprintf("%s-event-%d", r.id, seq))
 	}
 	if event.RunID == "" || event.RunID != r.id {
 		event.Payload = cloneEventPayload(event.Payload)
