@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/antonioborgerees/agentwrap"
+	"github.com/Antonio7098/agentwrap"
 )
 
 var runCounter atomic.Int64

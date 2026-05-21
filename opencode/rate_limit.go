@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antonioborgerees/agentwrap"
+	"github.com/Antonio7098/agentwrap"
 )
 
 type rateLimitClassification struct {

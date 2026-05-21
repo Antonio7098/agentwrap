@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antonioborgerees/agentwrap"
+	"github.com/Antonio7098/agentwrap"
 )
 
 func TestDecodeNativeLine(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/antonioborgerees/agentwrap"
+	"github.com/Antonio7098/agentwrap"
 )
 
 func TestCheckHealthUsesFakeProbesAndRedactsSecrets(t *testing.T) {

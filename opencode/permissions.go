@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/antonioborgerees/agentwrap"
+	"github.com/Antonio7098/agentwrap"
 )
 
 const opencodeConfigContentEnv = "OPENCODE_CONFIG_CONTENT="

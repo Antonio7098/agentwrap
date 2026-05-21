@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/antonioborgerees/agentwrap"
+	"github.com/Antonio7098/agentwrap"
 )
 
 const (

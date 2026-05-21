@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antonioborgerees/agentwrap"
+	"github.com/Antonio7098/agentwrap"
 )
 
 func TestRealOpenCodeSmoke(t *testing.T) {

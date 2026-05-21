@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/antonioborgerees/agentwrap"
+	"github.com/Antonio7098/agentwrap"
 )
 
 var _ agentwrap.HealthChecker = (*Runtime)(nil)

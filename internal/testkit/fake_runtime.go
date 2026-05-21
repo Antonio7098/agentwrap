@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	agentwrap "github.com/antonioborgerees/agentwrap"
+	agentwrap "github.com/Antonio7098/agentwrap"
 )
 
 // FakeRuntime proves the public contract without launching a real runtime.

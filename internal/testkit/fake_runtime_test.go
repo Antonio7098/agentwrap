@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	agentwrap "github.com/antonioborgerees/agentwrap"
+	agentwrap "github.com/Antonio7098/agentwrap"
 )
 
 func TestFakeRuntimeContractNormalStream(t *testing.T) {
