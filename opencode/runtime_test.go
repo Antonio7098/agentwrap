@@ -1151,6 +1151,13 @@ func TestRunMalformedAfterFinalCompletesWithWarning(t *testing.T) {
 	}
 }
 
+func TestPostFinalNonDecodeErrorBecomesWarning(t *testing.T) {
+	r := &run{sawFinal: true}
+	if got := r.postFinalDecodeWarning(context.Canceled); got == "" {
+		t.Fatal("postFinalDecodeWarning returned empty string, want generic post-final warning")
+	}
+}
+
 // TestRunEmptyStdoutFails covers empty stdout scenario:
 func TestRunEmptyStdoutFails(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: ""}}

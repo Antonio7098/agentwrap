@@ -389,10 +389,14 @@ func (r *run) postFinalDecodeWarning(err error) string {
 		return ""
 	}
 	var d *decodeError
-	if !errors.As(err, &d) {
+	if errors.As(err, &d) {
+		return fmt.Sprintf("OpenCode emitted malformed structured output after a final result; ignoring post-final decode error at line %d: %v", d.line, d.err)
+	}
+	var sdkErr *agentwrap.SDKError
+	if errors.As(err, &sdkErr) {
 		return ""
 	}
-	return fmt.Sprintf("OpenCode emitted malformed structured output after a final result; ignoring post-final decode error at line %d: %v", d.line, d.err)
+	return fmt.Sprintf("OpenCode returned an error after a final result; ignoring post-final error: %v", err)
 }
 
 func (r *run) refreshResultEventStats(result *agentwrap.RunResult) {
