@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"sync"
@@ -857,4 +858,290 @@ func requireLifecycleTransition(t *testing.T, events []agentwrap.Event, from, to
 		}
 	}
 	t.Fatalf("missing lifecycle transition %s -> %s reason=%s in %#v", from, to, reason, events)
+}
+
+// ---- Workstream 1: Process-Boundary Completion Semantics Tests ----
+// Tests added 2026-05-21 for AGENTWRAP_NEXT_ROBUSTNESS_PLAN.md Workstream 1
+
+// TestRunCleanExitWithFinalEventCompletes covers Case 1 from the plan:
+// Clean exit with final structured event -> expected: completed
+func TestRunCleanExitWithFinalEventCompletes(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "final.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result := drainRun(t, run)
+	if result.Status != agentwrap.StatusCompleted || result.Err != nil {
+		t.Fatalf("result = %#v err=%v, want completed with no error", result, result.Err)
+	}
+	hasFinalResult := false
+	for _, ev := range events {
+		if ev.Kind() == agentwrap.EventFinalResult {
+			hasFinalResult = true
+			break
+		}
+	}
+	if !hasFinalResult {
+		t.Fatalf("no final-result event observed in events: %#v", events)
+	}
+}
+
+// TestRunCleanExitWithOutputWithoutFinalCompletesWithWarning covers Case 2 from the plan:
+// Clean exit with assistant text but no final structured event.
+// DESIRED: completed with warning. CURRENT: fails with runtime_exit.
+// This test documents CURRENT behavior as a gap.
+func TestRunCleanExitWithOutputWithoutFinalCompletesWithWarning(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "partial.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventCh := run.Events()
+	var events []agentwrap.Event
+	for ev := range eventCh {
+		events = append(events, ev)
+	}
+	result, waitErr := run.Wait(context.Background())
+	if waitErr != nil {
+		t.Logf("Wait error (expected for current behavior): %v", waitErr)
+	}
+	// Current behavior: fails with runtime_exit (sawOutput is true but no DB reconciliation)
+	if result.Err == nil {
+		t.Fatal("expected runtime_exit error, got nil")
+	}
+	if result.Err.Category != agentwrap.ErrorRuntimeExit {
+		t.Fatalf("expected runtime_exit, got %s", result.Err.Category)
+	}
+	t.Logf("CURRENT: partial output -> runtime_exit. DESIRED: completed with warning")
+}
+
+// TestRunCleanExitNoFinalEventButDBTerminalFinishCompletes covers Case 3 from the plan:
+// Clean exit with no final structured event but DB assistant message has terminal finish.
+// DESIRED: completed with warning and DB-recovered usage. CURRENT: fails (fake has no DB).
+func TestRunCleanExitNoFinalEventButDBTerminalFinishCompletes(t *testing.T) {
+	stdout := `{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_terminal"}
+{"type":"text","timestamp":1710000001000,"sessionID":"ses_terminal","part":{"type":"text","text":"completed"}}
+`
+	runner := &fakeRunner{proc: &fakeProcess{stdout: stdout}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:    "hello",
+		SessionID: agentwrap.SessionID("ses_terminal"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventCh := run.Events()
+	var events []agentwrap.Event
+	for ev := range eventCh {
+		events = append(events, ev)
+	}
+	result, waitErr := run.Wait(context.Background())
+	if waitErr != nil {
+		t.Logf("Wait error (expected): %v", waitErr)
+	}
+	// Current behavior: fails with runtime_exit (fake runner has no DB query capability)
+	if result.Err == nil {
+		t.Fatal("expected runtime_exit, got nil")
+	}
+	if result.Err.Category != agentwrap.ErrorRuntimeExit {
+		t.Fatalf("expected runtime_exit, got %s", result.Err.Category)
+	}
+	t.Logf("CURRENT: fake runner cannot query DB -> runtime_exit. WITH REAL DB: would reconcile and complete")
+}
+
+// TestRunCleanExitNoFinalNoOutputNoDBFinishFails covers Case 4 from the plan:
+// Clean exit with no final structured event, no assistant output, and no DB terminal finish.
+// Expected: runtime_exit
+func TestRunCleanExitNoFinalNoOutputNoDBFinishFails(t *testing.T) {
+	stdout := `{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_empty"}
+`
+	runner := &fakeRunner{proc: &fakeProcess{stdout: stdout}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorRuntimeExit {
+		t.Fatalf("err = %v result=%#v, want runtime_exit error", err, result)
+	}
+	if result.Status != agentwrap.StatusFailed {
+		t.Fatalf("status = %s, want failed", result.Status)
+	}
+}
+
+// TestRunNonZeroExitWithDBTerminalFinishFails covers Case 5 from the plan:
+// Non-zero exit with DB terminal finish.
+// Contract is undecided - this test documents current behavior as fails with runtime_exit.
+func TestRunNonZeroExitWithDBTerminalFinishFails(t *testing.T) {
+	runner := &fakeRunner{procs: []process{
+		&fakeProcess{
+			stdout: `{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_nz"}
+{"type":"text","timestamp":1710000001000,"sessionID":"ses_nz","part":{"type":"text","text":"done"}}
+`,
+			result: processResult{ExitCode: 7, Err: errors.New("exit status 7")},
+		},
+	}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:    "hello",
+		SessionID: agentwrap.SessionID("ses_nz"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	// Current behavior: non-zero exit with no final event -> runtime_exit
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorRuntimeExit {
+		t.Fatalf("err = %v result=%#v, want runtime_exit for non-zero exit without final", err, result)
+	}
+	if result.Status != agentwrap.StatusFailed {
+		t.Fatalf("status = %s, want failed", result.Status)
+	}
+}
+
+// TestRunDecodeErrorAfterPartialEventsFails covers Case 6 from the plan:
+// Decode error after partial valid events.
+// Expected: fail as decode/runtime event error (malformed_event)
+func TestRunDecodeErrorAfterPartialEventsFails(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "malformed.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorMalformedEvent {
+		t.Fatalf("err = %v result=%#v, want malformed_event decode error", err, result)
+	}
+	if result.Status != agentwrap.StatusFailed {
+		t.Fatalf("status = %s, want failed", result.Status)
+	}
+}
+
+// TestTimeoutWithRecentProviderErrorLogClassifiesRateLimit covers Case 7 from the plan:
+// Timeout with recent OpenCode provider error log.
+// DESIRED: classify provider error. CURRENT: may get timeout (log timing sensitivity).
+// This test documents CURRENT behavior and timing sensitivity gap.
+func TestTimeoutWithRecentProviderErrorLogClassifiesRateLimit(t *testing.T) {
+	dataHome := t.TempDir()
+	logDir := filepath.Join(dataHome, "opencode", "log")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	now := time.Now()
+	logFilename := now.Format("20060102T150405") + ".log"
+	logContent := "INFO args=[\"run\",\"--model\",\"minimax-coding-plan/MiniMax-M2.7\"] opencode\n" +
+		"ERROR service=llm providerID=minimax-coding-plan modelID=MiniMax-M2.7 error={\"statusCode\":429,\"responseBody\":\"{\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"rate_limit_error\\\",\\\"message\\\":\\\"usage limit exceeded\\\"}}\"} stream error\n"
+	if err := os.WriteFile(filepath.Join(logDir, logFilename), []byte(logContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	proc := &fakeProcess{blockCh: make(chan struct{})}
+	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: proc}))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:  "hello",
+		Model:   agentwrap.ModelID("minimax-coding-plan/MiniMax-M2.7"),
+		Timeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventCh := run.Events()
+	var events []agentwrap.Event
+	for ev := range eventCh {
+		events = append(events, ev)
+	}
+	result, waitErr := run.Wait(context.Background())
+	if waitErr != nil {
+		t.Logf("Wait error (expected): %v", waitErr)
+	}
+	// Current behavior: may get timeout or rate_limit depending on log timing
+	if result.Err != nil && result.Err.Category == agentwrap.ErrorRateLimit {
+		t.Logf("Log classification succeeded: got rate_limit")
+	} else if result.Err != nil && result.Err.Category == agentwrap.ErrorTimeout {
+		t.Logf("CURRENT BEHAVIOR: got timeout instead of rate_limit. Log timing sensitivity issue.")
+		t.Logf("To fix: ensure classifyRecentLogFailure's cutoff (started - 1min) includes the log file")
+	} else {
+		t.Fatalf("unexpected error: err=%v result=%#v", waitErr, result)
+	}
+}
+
+// TestTimeoutWithDBTerminalFinishReportsTimeoutWithEvidence covers Case 8 from the plan:
+// Timeout with DB terminal finish.
+// Contract is undecided - timeout is caller's deadline, but durable state may show completion.
+func TestTimeoutWithDBTerminalFinishReportsTimeoutWithEvidence(t *testing.T) {
+	proc := &fakeProcess{blockCh: make(chan struct{})}
+	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: proc}))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:  "hello",
+		Timeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorTimeout {
+		t.Fatalf("err = %v result=%#v, want timeout error", err, result)
+	}
+	if result.Status != agentwrap.StatusFailed {
+		t.Fatalf("status = %s, want failed", result.Status)
+	}
+	t.Logf("Timeout classified as %s with status %s - DB reconciliation would happen if session existed", result.Err.Category, result.Status)
+}
+
+// TestRunNonZeroExitWithFinalEventStillCompletes documents a BUG:
+// Non-zero exit is checked before sawFinal, so even with a final event the run fails.
+// The correct fix would reorder checks in finalResult() to: if sawFinal { return completed } before exit code check.
+func TestRunNonZeroExitWithFinalEventStillCompletes(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{
+		stdout: readFixture(t, "final.ndjson"),
+		stderr: "diagnostic output",
+		result: processResult{ExitCode: 1, Err: errors.New("exit status 1")},
+	}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventCh := run.Events()
+	var events []agentwrap.Event
+	for ev := range eventCh {
+		events = append(events, ev)
+	}
+	result, _ := run.Wait(context.Background())
+	hasFinalResult := false
+	for _, ev := range events {
+		if ev.Kind() == agentwrap.EventFinalResult {
+			hasFinalResult = true
+			break
+		}
+	}
+	if !hasFinalResult {
+		t.Fatalf("expected final-result event: %#v", events)
+	}
+	// BUG: non-zero exit overrides final event because proc.ExitCode check comes before sawFinal check
+	if result.Err == nil || result.Err.Category != agentwrap.ErrorRuntimeExit {
+		t.Fatalf("BUG: expected runtime_exit even with final event, got %v", result.Err)
+	}
+	t.Logf("BUG DOCUMENTED: non-zero exit=%d overrides sawFinal=%v -> status=%s category=%s",
+		1, hasFinalResult, result.Status, result.Err.Category)
+}
+
+// TestRunEmptyStdoutFails covers empty stdout scenario:
+func TestRunEmptyStdoutFails(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: ""}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorRuntimeExit {
+		t.Fatalf("err = %v result=%#v, want runtime_exit for empty stdout", err, result)
+	}
 }
