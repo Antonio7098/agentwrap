@@ -22,6 +22,7 @@ func (execProcessRunner) Start(ctx context.Context, spec processSpec) (process, 
 	if len(spec.Env) > 0 {
 		cmd.Env = append(os.Environ(), spec.Env...)
 	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -73,7 +74,7 @@ func (p *execProcess) Cancel(ctx context.Context) cleanupResult {
 	if p.cmd.ProcessState != nil && p.cmd.ProcessState.Exited() {
 		return result
 	}
-	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := signalProcessGroup(p.cmd.Process.Pid, syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		result.Err = err
 	} else if errors.Is(err, os.ErrProcessDone) {
 		return result
@@ -88,10 +89,23 @@ func (p *execProcess) Cancel(ctx context.Context) cleanupResult {
 		return result
 	}
 	result.ForceAttempted = true
-	if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && result.Err == nil {
+	if err := signalProcessGroup(p.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) && result.Err == nil {
 		result.Err = err
 	}
 	return result
+}
+
+func signalProcessGroup(pid int, signal syscall.Signal) error {
+	if pid <= 0 {
+		return os.ErrProcessDone
+	}
+	if err := syscall.Kill(-pid, signal); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	return nil
 }
 
 type limitBuffer struct {

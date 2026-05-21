@@ -6,6 +6,33 @@ This changelog is intentionally detailed. The changes here were driven by real s
 
 ## Unreleased
 
+### Final result precedence and subprocess cleanup were hardened
+
+We tightened the OpenCode subprocess adapter around the two process-boundary cases that mattered most in smoke testing.
+
+What changed:
+
+- An observed final structured event now wins over a later generic non-zero process exit.
+- Explicit provider failures such as rate-limit classifications still override a final event when the stderr evidence is strong.
+- Malformed structured output after an observed final event is recorded as warning/evidence instead of overturning the completed result.
+- OpenCode subprocesses now start in their own process group.
+- Cancellation cleanup now targets the process group with `SIGTERM` first and `SIGKILL` as a fallback.
+
+Why this matters:
+
+The wrapper needs to distinguish between "the agent finished successfully but the process exited non-zero" and "the provider or runtime actually failed." The cleanup path also needs to terminate any subprocesses the CLI may have spawned so tests and real runs do not leave stragglers behind.
+
+Evidence from smoke testing:
+
+- Final structured events are now preserved as successful runs in the adapter tests.
+- Post-final malformed output now preserves the completed result while retaining diagnostic metadata.
+- The process cleanup path now has group-aware termination semantics instead of only signaling the direct child.
+- The smoke harness gained a configurable fake OpenCode peer so these boundary cases can be exercised deterministically.
+
+Deferred follow-up:
+
+- The current process-group implementation is Unix-specific because it relies on `syscall.SysProcAttr{Setpgid: true}` and negative-PID signaling. Windows build-tagged support is still deferred.
+
 ### OpenCode local runtime and DB failures are now classified explicitly
 
 We added explicit handling for OpenCode local state failures in `opencode/runtime.go`.
@@ -187,4 +214,3 @@ Verified in `agentwrap-smoke` using a real OpenCode binary:
 - `session-fork` remained an explicit configuration failure.
 
 These runs are the basis for the adapter changes above. The changelog is intentionally explicit about them because the whole point of the work is to make the wrapper's behavior traceable back to observed evidence.
-

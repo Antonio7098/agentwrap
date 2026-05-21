@@ -257,7 +257,7 @@ func TestStartRunAllowsBestEffortUnsupportedPathPermission(t *testing.T) {
 
 func TestPolicyRunnerWrapsOpenCodeRuntimeWithoutAdapterRetry(t *testing.T) {
 	runner := &fakeRunner{procs: []process{
-		&fakeProcess{stdout: readFixture(t, "normal.ndjson"), stderr: "temporary", result: processResult{ExitCode: 1}},
+		&fakeProcess{stdout: readFixture(t, "partial.ndjson"), stderr: "temporary", result: processResult{ExitCode: 1}},
 		&fakeProcess{stdout: readFixture(t, "normal.ndjson")},
 	}}
 	rt := NewRuntime(withProcessRunner(runner))
@@ -1094,9 +1094,9 @@ func TestTimeoutWithDBTerminalFinishReportsTimeoutWithEvidence(t *testing.T) {
 	t.Logf("Timeout classified as %s with status %s - DB reconciliation would happen if session existed", result.Err.Category, result.Status)
 }
 
-// TestRunNonZeroExitWithFinalEventStillCompletes documents a BUG:
-// Non-zero exit is checked before sawFinal, so even with a final event the run fails.
-// The correct fix would reorder checks in finalResult() to: if sawFinal { return completed } before exit code check.
+// TestRunNonZeroExitWithFinalEventStillCompletes covers the final-state
+// precedence contract: an observed final structured result wins over a later
+// non-zero process exit.
 func TestRunNonZeroExitWithFinalEventStillCompletes(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{
 		stdout: readFixture(t, "final.ndjson"),
@@ -1113,7 +1113,7 @@ func TestRunNonZeroExitWithFinalEventStillCompletes(t *testing.T) {
 	for ev := range eventCh {
 		events = append(events, ev)
 	}
-	result, _ := run.Wait(context.Background())
+	result, waitErr := run.Wait(context.Background())
 	hasFinalResult := false
 	for _, ev := range events {
 		if ev.Kind() == agentwrap.EventFinalResult {
@@ -1124,12 +1124,31 @@ func TestRunNonZeroExitWithFinalEventStillCompletes(t *testing.T) {
 	if !hasFinalResult {
 		t.Fatalf("expected final-result event: %#v", events)
 	}
-	// BUG: non-zero exit overrides final event because proc.ExitCode check comes before sawFinal check
-	if result.Err == nil || result.Err.Category != agentwrap.ErrorRuntimeExit {
-		t.Fatalf("BUG: expected runtime_exit even with final event, got %v", result.Err)
+	if waitErr != nil || result.Err != nil {
+		t.Fatalf("err = %v result.Err = %v, want completed final event to supersede exit status", waitErr, result.Err)
 	}
-	t.Logf("BUG DOCUMENTED: non-zero exit=%d overrides sawFinal=%v -> status=%s category=%s",
-		1, hasFinalResult, result.Status, result.Err.Category)
+	if result.Status != agentwrap.StatusCompleted {
+		t.Fatalf("status = %s, want completed", result.Status)
+	}
+}
+
+func TestRunMalformedAfterFinalCompletesWithWarning(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "final.ndjson") + `{"type":` + "\n"}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if result.Status != agentwrap.StatusCompleted || result.Err != nil {
+		t.Fatalf("result = %#v err=%v, want completed with post-final warning", result, result.Err)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatalf("warnings = %#v, want post-final decode warning", result.Warnings)
+	}
+	if got, _ := result.Metadata.NativeMetadata["post_final_decode_warning"].(string); got == "" {
+		t.Fatalf("post_final_decode_warning missing in native metadata: %#v", result.Metadata.NativeMetadata)
+	}
 }
 
 // TestRunEmptyStdoutFails covers empty stdout scenario:
