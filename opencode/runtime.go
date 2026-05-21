@@ -157,21 +157,22 @@ type run struct {
 	started       time.Time
 	finished      time.Time
 
-	context      agentwrap.RuntimeContext
-	eventMu      sync.Mutex
-	seq          int64
-	sawFinal     bool
-	sessionID    agentwrap.SessionID
-	artifacts    []agentwrap.ArtifactRef
-	warnings     []string
-	usage        agentwrap.Usage
-	rateLimit    *agentwrap.RateLimitInfo
-	permissions  agentwrap.PermissionMetadata
-	nativeTypes  map[string]int
-	categories   map[string]int
-	stderrBuffer *limitBuffer
-	stderrDone   chan struct{}
-	now          clock
+	context            agentwrap.RuntimeContext
+	eventMu            sync.Mutex
+	seq                int64
+	sawFinal           bool
+	sessionID          agentwrap.SessionID
+	artifacts          []agentwrap.ArtifactRef
+	warnings           []string
+	usage              agentwrap.Usage
+	rateLimit          *agentwrap.RateLimitInfo
+	permissions        agentwrap.PermissionMetadata
+	nativeTypes        map[string]int
+	categories         map[string]int
+	postFinalDecodeErr string
+	stderrBuffer       *limitBuffer
+	stderrDone         chan struct{}
+	now                clock
 }
 
 func (r *run) ID() agentwrap.RunID            { return r.id }
@@ -257,6 +258,11 @@ func (r *run) run() {
 		}
 		return nil
 	})
+	if warning := r.postFinalDecodeWarning(decodeErr); warning != "" {
+		r.warnings = append(r.warnings, warning)
+		r.postFinalDecodeErr = warning
+		decodeErr = nil
+	}
 	processResult := r.proc.Wait()
 	<-r.stderrDone
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -299,10 +305,21 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 		} else {
 			status = agentwrap.StatusFailed
 		}
+	} else if r.sawFinal {
+		if proc.Err != nil || proc.ExitCode != 0 {
+			if exitErr := classifyExitError(proc, r.stderrBuffer.String()); exitErr.Category != agentwrap.ErrorRuntimeExit {
+				sdkErr = exitErr
+				status = agentwrap.StatusFailed
+			} else {
+				status = agentwrap.StatusCompleted
+			}
+		} else {
+			status = agentwrap.StatusCompleted
+		}
 	} else if proc.Err != nil || proc.ExitCode != 0 {
 		sdkErr = classifyExitError(proc, r.stderrBuffer.String())
 		status = agentwrap.StatusFailed
-	} else if !r.sawFinal {
+	} else {
 		sdkErr = agentwrap.NewError(agentwrap.ErrorRuntimeExit, "opencode run", "OpenCode finished without a final structured result", nil, agentwrap.WithDebugDetail(debugDetail(r.stderrBuffer.String())))
 		status = agentwrap.StatusFailed
 	}
@@ -326,6 +343,9 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 			"native_event_types":     copyStringIntMap(r.nativeTypes),
 			"native_extension_count": r.categories[string(agentwrap.EventNativeExtension)],
 		},
+	}
+	if r.postFinalDecodeErr != "" {
+		metadata.NativeMetadata["post_final_decode_warning"] = r.postFinalDecodeErr
 	}
 	if r.rateLimit != nil {
 		metadata.NativeMetadata["rate_limit_info"] = r.rateLimit
@@ -362,6 +382,21 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 		return result, sdkErr
 	}
 	return result, nil
+}
+
+func (r *run) postFinalDecodeWarning(err error) string {
+	if err == nil || !r.sawFinal {
+		return ""
+	}
+	var d *decodeError
+	if errors.As(err, &d) {
+		return fmt.Sprintf("OpenCode emitted malformed structured output after a final result; ignoring post-final decode error at line %d: %v", d.line, d.err)
+	}
+	var sdkErr *agentwrap.SDKError
+	if errors.As(err, &sdkErr) {
+		return ""
+	}
+	return fmt.Sprintf("OpenCode returned an error after a final result; ignoring post-final error: %v", err)
 }
 
 func (r *run) refreshResultEventStats(result *agentwrap.RunResult) {
