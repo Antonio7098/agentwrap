@@ -502,25 +502,6 @@ func TestClassifyRateLimitDataParsesOpenCodeHeaders(t *testing.T) {
 	}
 }
 
-func TestClassifyRateLimitDataDetectsNestedErrorType(t *testing.T) {
-	// OpenCode emits errors with nested error.type: rate_limit_error.
-	// The classifier must check the nested error object, not just top-level message/status.
-	classified := classifyRateLimitData("opencode event", map[string]any{
-		"statusCode": 0,
-		"message":    "Model not found: opencode/gpt-5.5. Did you mean: gpt-5.5, gpt-5.5-pro?",
-		"error": map[string]any{
-			"type":    "rate_limit_error",
-			"message": "usage limit exceeded",
-		},
-	}, agentwrap.RuntimeContext{Provider: "opencode", Model: "gpt-5.5"})
-	if classified == nil || classified.err == nil || classified.err.Category != agentwrap.ErrorRateLimit {
-		t.Fatalf("classification = %#v, want rate_limit from nested error.type", classified)
-	}
-	if classified.info == nil || classified.info.Source != "error.type" {
-		t.Fatalf("info = %#v, want source=error.type", classified.info)
-	}
-}
-
 func TestProjectNativeFatalErrorPromotesRateLimit(t *testing.T) {
 	record := nativeRecord{
 		Type: "error",

@@ -23,28 +23,6 @@ func classifyRateLimitData(op string, data map[string]any, runtimeCtx agentwrap.
 	if len(data) == 0 {
 		return nil
 	}
-	// Check nested error.type first — this is the structural rate-limit signal
-	// from OpenCode, distinct from the human-readable message.
-	if errObj, ok := data["error"].(map[string]any); ok {
-		if strings.EqualFold(strings.TrimSpace(stringValue(errObj["type"])), "rate_limit_error") {
-			errMsg := stringValue(errObj["message"])
-			errBody := stringValue(errObj["body"])
-			if errBody == "" {
-				errBody = stringValue(errObj["responseBody"])
-			}
-			errHeaders := headerMapFromAny(errObj["responseHeaders"])
-			if len(errHeaders) == 0 {
-				errHeaders = headerMapFromAny(errObj["headers"])
-			}
-			errMetadata := stringMapFromAny(errObj["metadata"])
-			status, _ := intFromAny(firstNonNil(data["statusCode"], errObj["status"], errObj["code"]))
-			info := rateLimitInfoFrom(errHeaders, errMetadata, runtimeCtx, errBody, errMsg, "error.type")
-			return &rateLimitClassification{
-				err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(errBody, errMsg), nil, rateLimitErrorOptions(status, errHeaders, errBody, errMetadata, runtimeCtx, info)...),
-				info: info,
-			}
-		}
-	}
 	message := messageFrom(data)
 	headers := headerMapFromAny(data["responseHeaders"])
 	if len(headers) == 0 {
