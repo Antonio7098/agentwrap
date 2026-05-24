@@ -93,6 +93,9 @@ func TestProjectNativeEvents(t *testing.T) {
 		{name: "blocking", line: `{"type":"question.asked","sessionID":"ses_1"}`, wantCategory: agentwrap.EventBlocking},
 		{name: "session", line: `{"type":"session.status","sessionID":"ses_1"}`, wantCategory: agentwrap.EventSession},
 		{name: "final", line: `{"type":"step_finish","sessionID":"ses_1"}`, wantCategory: agentwrap.EventFinalResult, wantFinal: true},
+		{name: "final stop reason", line: `{"type":"step_finish","sessionID":"ses_1","finish_reason":"stop"}`, wantCategory: agentwrap.EventFinalResult, wantFinal: true},
+		{name: "non terminal finish", line: `{"type":"step_finish","sessionID":"ses_1","finish_reason":"tool_calls"}`, wantCategory: agentwrap.EventProgress},
+		{name: "nested part stop reason", line: `{"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","reason":"stop"}}`, wantCategory: agentwrap.EventFinalResult, wantFinal: true},
 		{name: "unknown", line: `{"type":"vendor.future","sessionID":"ses_1"}`, wantCategory: agentwrap.EventNativeExtension},
 	}
 

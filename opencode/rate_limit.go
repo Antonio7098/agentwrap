@@ -23,6 +23,28 @@ func classifyRateLimitData(op string, data map[string]any, runtimeCtx agentwrap.
 	if len(data) == 0 {
 		return nil
 	}
+	// Check nested error.type first — this is the structural rate-limit signal
+	// from OpenCode, distinct from the human-readable message.
+	if errObj, ok := data["error"].(map[string]any); ok {
+		if strings.EqualFold(strings.TrimSpace(stringValue(errObj["type"])), "rate_limit_error") {
+			errMsg := stringValue(errObj["message"])
+			errBody := stringValue(errObj["body"])
+			if errBody == "" {
+				errBody = stringValue(errObj["responseBody"])
+			}
+			errHeaders := headerMapFromAny(errObj["responseHeaders"])
+			if len(errHeaders) == 0 {
+				errHeaders = headerMapFromAny(errObj["headers"])
+			}
+			errMetadata := stringMapFromAny(errObj["metadata"])
+			status, _ := intFromAny(firstNonNil(data["statusCode"], errObj["status"], errObj["code"]))
+			info := rateLimitInfoFrom(errHeaders, errMetadata, runtimeCtx, errBody, errMsg, "error.type")
+			return &rateLimitClassification{
+				err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(errBody, errMsg), nil, rateLimitErrorOptions(status, errHeaders, errBody, errMetadata, runtimeCtx, info)...),
+				info: info,
+			}
+		}
+	}
 	message := messageFrom(data)
 	headers := headerMapFromAny(data["responseHeaders"])
 	if len(headers) == 0 {
@@ -51,6 +73,7 @@ func classifyRateLimitPayload(op, text string, headers map[string]string, runtim
 }
 
 func classifyRateLimitDetails(op, message, body string, headers, metadata map[string]string, status int, runtimeCtx agentwrap.RuntimeContext) *rateLimitClassification {
+	body = expandNestedRateLimitBody(body)
 	normalizedBody := strings.ToLower(body)
 	normalizedMessage := strings.ToLower(message)
 	if status == 429 {
@@ -68,8 +91,8 @@ func classifyRateLimitDetails(op, message, body string, headers, metadata map[st
 			info: info,
 		}
 	}
-	if containsAny(normalizedBody, "gousagelimiterror", "too_many_requests", "\"rate_limit\"", "\"resource_exhausted\"", "\"unavailable\"") ||
-		containsAny(normalizedMessage, "rate limit", "too many requests", "rate increased too quickly", "provider is overloaded", "resource_exhausted", "too_many_requests") {
+	if containsAny(normalizedBody, "gousagelimiterror", "too_many_requests", "rate_limit_error", "usage limit exceeded", "\"rate_limit\"", "\"resource_exhausted\"", "\"unavailable\"") ||
+		containsAny(normalizedMessage, "rate limit", "too many requests", "usage limit exceeded", "rate_limit_error", "rate increased too quickly", "provider is overloaded", "resource_exhausted", "too_many_requests") {
 		info := rateLimitInfoFrom(headers, metadata, runtimeCtx, body, message, "message_or_body")
 		return &rateLimitClassification{
 			err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(body, message), nil, rateLimitErrorOptions(status, headers, body, metadata, runtimeCtx, info)...),
@@ -84,6 +107,42 @@ func classifyRateLimitDetails(op, message, body string, headers, metadata map[st
 		}
 	}
 	return nil
+}
+
+func expandNestedRateLimitBody(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return body
+	}
+	var payload any
+	if json.Unmarshal([]byte(body), &payload) != nil {
+		return body
+	}
+	parts := []string{body}
+	collectRateLimitStrings(payload, &parts)
+	return strings.Join(parts, "\n")
+}
+
+func collectRateLimitStrings(value any, parts *[]string) {
+	switch v := value.(type) {
+	case map[string]any:
+		for _, nested := range v {
+			collectRateLimitStrings(nested, parts)
+		}
+	case []any:
+		for _, nested := range v {
+			collectRateLimitStrings(nested, parts)
+		}
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return
+		}
+		*parts = append(*parts, v)
+		var nested any
+		if json.Unmarshal([]byte(v), &nested) == nil {
+			collectRateLimitStrings(nested, parts)
+		}
+	}
 }
 
 func rateLimitErrorOptions(status int, headers map[string]string, body string, metadata map[string]string, runtimeCtx agentwrap.RuntimeContext, info *agentwrap.RateLimitInfo) []agentwrap.ErrorOption {

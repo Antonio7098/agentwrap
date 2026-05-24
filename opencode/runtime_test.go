@@ -215,6 +215,39 @@ func TestStartRunRejectsInvalidExistingConfigContent(t *testing.T) {
 	}
 }
 
+func TestStartRunRejectsProviderContainingSlash(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:   "hello",
+		Provider: "nonexistent-provider/test",
+		Model:    "model",
+	})
+	var sdkErr *agentwrap.SDKError
+	if err == nil || !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("err = %#v, want configuration SDKError", err)
+	}
+	if runner.starts != 0 {
+		t.Fatalf("process starts = %d, want 0", runner.starts)
+	}
+}
+
+func TestStartRunRejectsModelWithTooManySlashes(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		Model:  "provider/model/extra",
+	})
+	var sdkErr *agentwrap.SDKError
+	if err == nil || !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("err = %#v, want configuration SDKError", err)
+	}
+	if runner.starts != 0 {
+		t.Fatalf("process starts = %d, want 0", runner.starts)
+	}
+}
+
 func TestStartRunRejectsRequiredUnsupportedPathPermission(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
 	rt := NewRuntime(withProcessRunner(runner))
@@ -409,6 +442,20 @@ func TestClassifyExitErrorDetectsJSONRateLimit(t *testing.T) {
 	}
 }
 
+func TestClassifyRateLimitTextDetectsMiniMaxNestedUsageLimit(t *testing.T) {
+	stderr := `{"statusCode":429,"responseBody":"{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"usage limit exceeded, 5-hour usage limit reached, resets at 2026-05-20T20:00:00Z\"}}"}`
+	classified := classifyRateLimitText("opencode run", stderr, agentwrap.RuntimeContext{
+		Provider: "minimax-coding-plan",
+		Model:    "MiniMax-M2.7",
+	})
+	if classified == nil || classified.err == nil || classified.err.Category != agentwrap.ErrorRateLimit {
+		t.Fatalf("classification = %#v, want rate_limit", classified)
+	}
+	if classified.info == nil || classified.info.Provider != "minimax-coding-plan" || classified.info.Model != "MiniMax-M2.7" {
+		t.Fatalf("rate limit info = %#v", classified.info)
+	}
+}
+
 func TestClassifyExitErrorSkipsQuotaExceeded(t *testing.T) {
 	stderr := `{"statusCode":429,"responseBody":"insufficient_quota","message":"quota exceeded"}`
 	err := classifyExitError(processResult{ExitCode: 1}, stderr)
@@ -455,6 +502,25 @@ func TestClassifyRateLimitDataParsesOpenCodeHeaders(t *testing.T) {
 	}
 }
 
+func TestClassifyRateLimitDataDetectsNestedErrorType(t *testing.T) {
+	// OpenCode emits errors with nested error.type: rate_limit_error.
+	// The classifier must check the nested error object, not just top-level message/status.
+	classified := classifyRateLimitData("opencode event", map[string]any{
+		"statusCode": 0,
+		"message":    "Model not found: opencode/gpt-5.5. Did you mean: gpt-5.5, gpt-5.5-pro?",
+		"error": map[string]any{
+			"type":    "rate_limit_error",
+			"message": "usage limit exceeded",
+		},
+	}, agentwrap.RuntimeContext{Provider: "opencode", Model: "gpt-5.5"})
+	if classified == nil || classified.err == nil || classified.err.Category != agentwrap.ErrorRateLimit {
+		t.Fatalf("classification = %#v, want rate_limit from nested error.type", classified)
+	}
+	if classified.info == nil || classified.info.Source != "error.type" {
+		t.Fatalf("info = %#v, want source=error.type", classified.info)
+	}
+}
+
 func TestProjectNativeFatalErrorPromotesRateLimit(t *testing.T) {
 	record := nativeRecord{
 		Type: "error",
@@ -478,6 +544,32 @@ func TestProjectNativeFatalErrorPromotesRateLimit(t *testing.T) {
 	}
 	if _, ok := projected.event.Payload["rate_limit"]; !ok {
 		t.Fatalf("payload missing rate_limit: %#v", projected.event.Payload)
+	}
+}
+
+func TestProjectNativeFatalErrorClassifiesModelNotFound(t *testing.T) {
+	projected := projectNative(projectionInput{
+		runID: "run-1",
+		ctx:   agentwrap.RuntimeContext{RuntimeKind: "opencode", Provider: "opencode", Model: "not-a-real-model"},
+		record: nativeRecord{Type: "error", Data: map[string]any{
+			"message": "Model not found: opencode/not-a-real-model",
+		}},
+	})
+	if projected.fatal == nil || projected.fatal.Category != agentwrap.ErrorModelUnavailable {
+		t.Fatalf("fatal = %#v, want model_unavailable", projected.fatal)
+	}
+}
+
+func TestProjectNativeFatalErrorClassifiesAuthentication(t *testing.T) {
+	projected := projectNative(projectionInput{
+		runID: "run-1",
+		ctx:   agentwrap.RuntimeContext{RuntimeKind: "opencode", Provider: "anthropic", Model: "claude"},
+		record: nativeRecord{Type: "error", Data: map[string]any{
+			"message": "authentication failed: invalid API key",
+		}},
+	})
+	if projected.fatal == nil || projected.fatal.Category != agentwrap.ErrorAuthentication {
+		t.Fatalf("fatal = %#v, want authentication", projected.fatal)
 	}
 }
 
@@ -524,16 +616,85 @@ func TestRunExitRateLimitStoresRateLimitMetadata(t *testing.T) {
 	}
 }
 
-func TestRunPartialWithoutFinalFails(t *testing.T) {
+func TestRunPartialWithoutFinalCompletesWithWarning(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "partial.ndjson")}}
 	rt := NewRuntime(withProcessRunner(runner))
 	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, result, err := drainRunErr(t, run)
+	_, result := drainRun(t, run)
+	if result.Status != agentwrap.StatusCompleted || result.Err != nil || len(result.Warnings) == 0 {
+		t.Fatalf("result = %#v, want completed with warning", result)
+	}
+}
+
+func TestRunStepFinishWithNonTerminalReasonDoesNotSetFinal(t *testing.T) {
+	stdout := `{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_tool"}
+{"type":"step_finish","timestamp":1710000001000,"sessionID":"ses_tool","finish_reason":"tool_calls"}
+`
+	runner := &fakeRunner{proc: &fakeProcess{stdout: stdout}}
+	rt := NewRuntime(withProcessRunner(runner), withDBQuery(nil))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, result, err := drainRunErr(t, run)
 	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorRuntimeExit {
-		t.Fatalf("err = %v result=%#v", err, result)
+		t.Fatalf("err = %v result=%#v, want runtime_exit because tool_calls is non-terminal", err, result)
+	}
+	for _, event := range events {
+		if event.Kind() == agentwrap.EventFinalResult {
+			t.Fatalf("non-terminal step_finish was projected as final: %#v", event)
+		}
+	}
+	if got := result.Metadata.NativeMetadata["finish_reason"]; got != "tool_calls" {
+		t.Fatalf("finish_reason metadata = %#v, want tool_calls", got)
+	}
+}
+
+func TestRunSessionStatusIdleCompletesWithoutOutputFallback(t *testing.T) {
+	stdout := `{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_idle"}
+{"type":"session.status","timestamp":1710000001000,"sessionID":"ses_idle","status":{"type":"idle"}}
+`
+	runner := &fakeRunner{proc: &fakeProcess{stdout: stdout}}
+	rt := NewRuntime(withProcessRunner(runner), withDBQuery(nil))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if result.Status != agentwrap.StatusCompleted || result.Err != nil {
+		t.Fatalf("result = %#v, want idle-based completion", result)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want no output-fallback warning", result.Warnings)
+	}
+	if got := result.Metadata.NativeMetadata["native_terminal_evidence"]; got != "session.status.idle" {
+		t.Fatalf("native_terminal_evidence = %#v, want session.status.idle", got)
+	}
+}
+
+func TestRunTrailingEventsAfterStepFinishAreCaptured(t *testing.T) {
+	stdout := `{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_trailing"}
+{"type":"step_finish","timestamp":1710000001000,"sessionID":"ses_trailing","finish_reason":"stop"}
+{"type":"usage.update","timestamp":1710000002000,"sessionID":"ses_trailing","input_tokens":1,"output_tokens":2,"total_tokens":3}
+`
+	runner := &fakeRunner{proc: &fakeProcess{stdout: stdout}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if result.Status != agentwrap.StatusCompleted || result.Err != nil {
+		t.Fatalf("result = %#v, want completed", result)
+	}
+	if result.Usage.TotalTokens == nil || *result.Usage.TotalTokens != 3 {
+		t.Fatalf("usage = %#v, want trailing usage captured", result.Usage)
+	}
+	if got := result.Metadata.NativeMetadata["finish_reason"]; got != "stop" {
+		t.Fatalf("finish_reason metadata = %#v, want stop", got)
 	}
 }
 
@@ -615,19 +776,47 @@ func TestBlockedStdoutTimeoutStaysTimeout(t *testing.T) {
 	}
 }
 
-func TestCleanupFailureFailsRun(t *testing.T) {
+func TestCleanupFailurePreservesRunOutcome(t *testing.T) {
 	proc := &fakeProcess{stdout: readFixture(t, "normal.ndjson"), cancel: errors.New("cleanup failed")}
 	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: proc}))
 	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, result, err := drainRunErr(t, run)
-	if err == nil || result.Status != agentwrap.StatusFailed || result.Err == nil || result.Err.Category != agentwrap.ErrorCleanup {
-		t.Fatalf("cleanup failure result = err:%v result:%#v", err, result)
+	_, result := drainRun(t, run)
+	if result.Status != agentwrap.StatusCompleted || result.Err != nil {
+		t.Fatalf("cleanup failure result = %#v, want completed primary outcome", result)
 	}
 	if !result.Metadata.Cleanup.Failed || result.Metadata.Cleanup.Error == nil || result.Metadata.Cleanup.Error.Category != agentwrap.ErrorCleanup {
 		t.Fatalf("cleanup metadata = %#v", result.Metadata.Cleanup)
+	}
+	if len(result.Metadata.Errors) != 1 || result.Metadata.Errors[0].Category != agentwrap.ErrorCleanup {
+		t.Fatalf("metadata errors = %#v, want cleanup metadata error", result.Metadata.Errors)
+	}
+	if got, _ := result.Metadata.NativeMetadata["cleanup_warning"].(string); got == "" {
+		t.Fatalf("cleanup_warning missing from native metadata: %#v", result.Metadata.NativeMetadata)
+	}
+}
+
+func TestCancelWithCleanupFailurePreservesCancellation(t *testing.T) {
+	proc := &fakeProcess{blockCh: make(chan struct{}), cancel: errors.New("cleanup failed")}
+	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: proc}))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Cancel(context.Background()); err != nil {
+		t.Fatalf("Cancel error = %v, want nil with cleanup issue preserved in result metadata", err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorCancellation || result.Status != agentwrap.StatusCancelled {
+		t.Fatalf("err = %v result=%#v, want cancelled primary outcome", err, result)
+	}
+	if !result.Metadata.Cleanup.Failed || result.Metadata.Cleanup.Error == nil || result.Metadata.Cleanup.Error.Category != agentwrap.ErrorCleanup {
+		t.Fatalf("cleanup metadata = %#v", result.Metadata.Cleanup)
+	}
+	if len(result.Metadata.Errors) < 2 {
+		t.Fatalf("metadata errors = %#v, want cancellation plus cleanup", result.Metadata.Errors)
 	}
 }
 
@@ -905,17 +1094,12 @@ func TestRunCleanExitWithOutputWithoutFinalCompletesWithWarning(t *testing.T) {
 		events = append(events, ev)
 	}
 	result, waitErr := run.Wait(context.Background())
-	if waitErr != nil {
-		t.Logf("Wait error (expected for current behavior): %v", waitErr)
+	if waitErr != nil || result.Err != nil || result.Status != agentwrap.StatusCompleted {
+		t.Fatalf("result=%#v waitErr=%v, want completed with warning", result, waitErr)
 	}
-	// Current behavior: fails with runtime_exit (sawOutput is true but no DB reconciliation)
-	if result.Err == nil {
-		t.Fatal("expected runtime_exit error, got nil")
+	if len(result.Warnings) == 0 {
+		t.Fatalf("warnings = %#v, want missing-final warning", result.Warnings)
 	}
-	if result.Err.Category != agentwrap.ErrorRuntimeExit {
-		t.Fatalf("expected runtime_exit, got %s", result.Err.Category)
-	}
-	t.Logf("CURRENT: partial output -> runtime_exit. DESIRED: completed with warning")
 }
 
 // TestRunCleanExitNoFinalEventButDBTerminalFinishCompletes covers Case 3 from the plan:
@@ -923,10 +1107,11 @@ func TestRunCleanExitWithOutputWithoutFinalCompletesWithWarning(t *testing.T) {
 // DESIRED: completed with warning and DB-recovered usage. CURRENT: fails (fake has no DB).
 func TestRunCleanExitNoFinalEventButDBTerminalFinishCompletes(t *testing.T) {
 	stdout := `{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_terminal"}
-{"type":"text","timestamp":1710000001000,"sessionID":"ses_terminal","part":{"type":"text","text":"completed"}}
 `
 	runner := &fakeRunner{proc: &fakeProcess{stdout: stdout}}
-	rt := NewRuntime(withProcessRunner(runner))
+	rt := NewRuntime(withProcessRunner(runner), withDBQuery(func(context.Context, agentwrap.SessionID) (string, error) {
+		return `{"messages":[{"role":"assistant","finish":"stop","input_tokens":3,"output_tokens":4,"total_tokens":7}]}`, nil
+	}))
 	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
 		Prompt:    "hello",
 		SessionID: agentwrap.SessionID("ses_terminal"),
@@ -940,17 +1125,12 @@ func TestRunCleanExitNoFinalEventButDBTerminalFinishCompletes(t *testing.T) {
 		events = append(events, ev)
 	}
 	result, waitErr := run.Wait(context.Background())
-	if waitErr != nil {
-		t.Logf("Wait error (expected): %v", waitErr)
+	if waitErr != nil || result.Err != nil || result.Status != agentwrap.StatusCompleted {
+		t.Fatalf("result=%#v waitErr=%v, want DB-reconciled completion", result, waitErr)
 	}
-	// Current behavior: fails with runtime_exit (fake runner has no DB query capability)
-	if result.Err == nil {
-		t.Fatal("expected runtime_exit, got nil")
+	if result.Usage.TotalTokens == nil || *result.Usage.TotalTokens != 7 {
+		t.Fatalf("usage = %#v, want DB-recovered total tokens", result.Usage)
 	}
-	if result.Err.Category != agentwrap.ErrorRuntimeExit {
-		t.Fatalf("expected runtime_exit, got %s", result.Err.Category)
-	}
-	t.Logf("CURRENT: fake runner cannot query DB -> runtime_exit. WITH REAL DB: would reconcile and complete")
 }
 
 // TestRunCleanExitNoFinalNoOutputNoDBFinishFails covers Case 4 from the plan:
@@ -960,7 +1140,7 @@ func TestRunCleanExitNoFinalNoOutputNoDBFinishFails(t *testing.T) {
 	stdout := `{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_empty"}
 `
 	runner := &fakeRunner{proc: &fakeProcess{stdout: stdout}}
-	rt := NewRuntime(withProcessRunner(runner))
+	rt := NewRuntime(withProcessRunner(runner), withDBQuery(nil))
 	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
@@ -971,6 +1151,40 @@ func TestRunCleanExitNoFinalNoOutputNoDBFinishFails(t *testing.T) {
 	}
 	if result.Status != agentwrap.StatusFailed {
 		t.Fatalf("status = %s, want failed", result.Status)
+	}
+}
+
+func TestReconcileDBResponseHandlesShapes(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantDone  bool
+		wantTotal int64
+	}{
+		{name: "messages", body: `{"messages":[{"role":"assistant","finish":"stop","total_tokens":9}]}`, wantDone: true, wantTotal: 9},
+		{name: "parts", body: `[{"role":"assistant","finishReason":"stop","totalTokens":11}]`, wantDone: true, wantTotal: 11},
+		{name: "no assistant finish", body: `{"messages":[{"role":"user","finish":"stop"}]}`},
+		{name: "non json", body: `not json`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proof := reconcileDBResponse(tt.body, nil)
+			if proof.completed != tt.wantDone {
+				t.Fatalf("completed=%v, want %v proof=%#v", proof.completed, tt.wantDone, proof)
+			}
+			if tt.wantTotal > 0 {
+				if proof.usage.TotalTokens == nil || *proof.usage.TotalTokens != tt.wantTotal {
+					t.Fatalf("usage=%#v, want total %d", proof.usage, tt.wantTotal)
+				}
+			}
+		})
+	}
+}
+
+func TestReconcileDBResponseLockedDBIsRuntimeUnavailable(t *testing.T) {
+	proof := reconcileDBResponse("", errors.New("database is locked during wal_checkpoint"))
+	if proof.err == nil || proof.err.Category != agentwrap.ErrorRuntimeUnavailable {
+		t.Fatalf("proof=%#v, want runtime_unavailable", proof)
 	}
 }
 
@@ -1060,14 +1274,11 @@ func TestTimeoutWithRecentProviderErrorLogClassifiesRateLimit(t *testing.T) {
 	if waitErr != nil {
 		t.Logf("Wait error (expected): %v", waitErr)
 	}
-	// Current behavior: may get timeout or rate_limit depending on log timing
-	if result.Err != nil && result.Err.Category == agentwrap.ErrorRateLimit {
-		t.Logf("Log classification succeeded: got rate_limit")
-	} else if result.Err != nil && result.Err.Category == agentwrap.ErrorTimeout {
-		t.Logf("CURRENT BEHAVIOR: got timeout instead of rate_limit. Log timing sensitivity issue.")
-		t.Logf("To fix: ensure classifyRecentLogFailure's cutoff (started - 1min) includes the log file")
-	} else {
-		t.Fatalf("unexpected error: err=%v result=%#v", waitErr, result)
+	if result.Err == nil || result.Err.Category != agentwrap.ErrorRateLimit {
+		t.Fatalf("err=%v result=%#v, want rate_limit from recent matching OpenCode log", waitErr, result)
+	}
+	if result.Metadata.NativeMetadata["rate_limit_info"] == nil {
+		t.Fatalf("rate_limit_info missing from native metadata: %#v", result.Metadata.NativeMetadata)
 	}
 }
 
