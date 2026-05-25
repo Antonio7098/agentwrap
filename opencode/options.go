@@ -67,7 +67,7 @@ func withClock(now clock) Option {
 	}
 }
 
-func withDBQuery(query func(context.Context, agentwrap.SessionID) (string, error)) Option {
+func withDBQuery(query func(context.Context, agentwrap.SessionID, time.Time) (string, error)) Option {
 	return func(r *Runtime) {
 		r.dbQuery = query
 		r.dbQuerySet = true
@@ -81,7 +81,7 @@ type Runtime struct {
 	env         []string
 	stderrLimit int
 	runner      processRunner
-	dbQuery     func(context.Context, agentwrap.SessionID) (string, error)
+	dbQuery     func(context.Context, agentwrap.SessionID, time.Time) (string, error)
 	dbQuerySet  bool
 	now         clock
 }

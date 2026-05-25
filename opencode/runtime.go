@@ -185,7 +185,7 @@ type run struct {
 	terminalEvidence   string
 	stderrBuffer       *limitBuffer
 	stderrDone         chan struct{}
-	dbQuery            func(context.Context, agentwrap.SessionID) (string, error)
+	dbQuery            func(context.Context, agentwrap.SessionID, time.Time) (string, error)
 	now                clock
 }
 
@@ -466,18 +466,19 @@ func (r *run) reconcileFinalState() dbReconcileProof {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	body, err := r.dbQuery(ctx, firstSessionID(r.sessionID, r.req.SessionID))
+	body, err := r.dbQuery(ctx, firstSessionID(r.sessionID, r.req.SessionID), r.started)
 	return reconcileDBResponse(body, err)
 }
 
-func (r *Runtime) queryOpenCodeDB(ctx context.Context, sessionID agentwrap.SessionID) (string, error) {
+func (r *Runtime) queryOpenCodeDB(ctx context.Context, sessionID agentwrap.SessionID, since time.Time) (string, error) {
 	if sessionID == "" {
 		return "", nil
 	}
+	createdAtFilter := fmt.Sprintf("session_id=%s and time_created >= %d", sqlString(string(sessionID)), since.UnixMilli())
 	queries := map[string]string{
 		"session":  fmt.Sprintf("select * from session where id=%s", sqlString(string(sessionID))),
-		"messages": fmt.Sprintf("select * from message where session_id=%s order by time_created", sqlString(string(sessionID))),
-		"parts":    fmt.Sprintf("select * from part where session_id=%s order by time_created", sqlString(string(sessionID))),
+		"messages": fmt.Sprintf("select * from message where %s order by time_created", createdAtFilter),
+		"parts":    fmt.Sprintf("select * from part where %s order by time_created", createdAtFilter),
 	}
 	combined := map[string]any{}
 	for key, query := range queries {
@@ -581,7 +582,7 @@ func firstNonEmptyString(values ...any) string {
 }
 
 func (r *run) classifyRecentLogFailure() *rateLimitClassification {
-	for _, path := range recentOpenCodeLogs(r.started.Add(-5 * time.Minute)) {
+	for _, path := range recentOpenCodeLogs(r.started) {
 		content, err := os.ReadFile(path)
 		if err != nil || len(content) == 0 {
 			continue

@@ -1124,7 +1124,7 @@ func TestRunCleanExitNoFinalEventButDBTerminalFinishCompletes(t *testing.T) {
 	stdout := `{"type":"step_start","timestamp":1710000000000,"sessionID":"ses_terminal"}
 `
 	runner := &fakeRunner{proc: &fakeProcess{stdout: stdout}}
-	rt := NewRuntime(withProcessRunner(runner), withDBQuery(func(context.Context, agentwrap.SessionID) (string, error) {
+	rt := NewRuntime(withProcessRunner(runner), withDBQuery(func(context.Context, agentwrap.SessionID, time.Time) (string, error) {
 		return `{"messages":[{"role":"assistant","finish":"stop","input_tokens":3,"output_tokens":4,"total_tokens":7}]}`, nil
 	}))
 	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
@@ -1263,11 +1263,11 @@ func TestTimeoutWithRecentProviderErrorLogClassifiesRateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_DATA_HOME", dataHome)
-	now := time.Now()
-	logFilename := now.Format("20060102T150405") + ".log"
+	logFilename := time.Now().Format("20060102T150405") + ".log"
+	logPath := filepath.Join(logDir, logFilename)
 	logContent := "INFO args=[\"run\",\"--model\",\"minimax-coding-plan/MiniMax-M2.7\"] opencode\n" +
 		"ERROR service=llm providerID=minimax-coding-plan modelID=MiniMax-M2.7 error={\"statusCode\":429,\"responseBody\":\"{\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"rate_limit_error\\\",\\\"message\\\":\\\"usage limit exceeded\\\"}}\"} stream error\n"
-	if err := os.WriteFile(filepath.Join(logDir, logFilename), []byte(logContent), 0644); err != nil {
+	if err := os.WriteFile(logPath, []byte(logContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 	proc := &fakeProcess{blockCh: make(chan struct{})}
@@ -1278,6 +1278,9 @@ func TestTimeoutWithRecentProviderErrorLogClassifiesRateLimit(t *testing.T) {
 		Timeout: 20 * time.Millisecond,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(logPath, time.Now().Add(time.Second), time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	eventCh := run.Events()
@@ -1294,6 +1297,38 @@ func TestTimeoutWithRecentProviderErrorLogClassifiesRateLimit(t *testing.T) {
 	}
 	if result.Metadata.NativeMetadata["rate_limit_info"] == nil {
 		t.Fatalf("rate_limit_info missing from native metadata: %#v", result.Metadata.NativeMetadata)
+	}
+}
+
+func TestTimeoutIgnoresPreRunProviderErrorLog(t *testing.T) {
+	dataHome := t.TempDir()
+	logDir := filepath.Join(dataHome, "opencode", "log")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	logPath := filepath.Join(logDir, time.Now().Format("20060102T150405")+".log")
+	logContent := "ERROR service=llm providerID=minimax-coding-plan modelID=MiniMax-M2.7 error={\"statusCode\":429,\"responseBody\":\"{\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"rate_limit_error\\\",\\\"message\\\":\\\"usage limit exceeded\\\"}}\"} stream error\n"
+	if err := os.WriteFile(logPath, []byte(logContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(logPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	proc := &fakeProcess{blockCh: make(chan struct{})}
+	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: proc}))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:  "hello",
+		Model:   agentwrap.ModelID("minimax-coding-plan/MiniMax-M2.7"),
+		Timeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := drainRunErr(t, run)
+	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorTimeout {
+		t.Fatalf("err = %v result=%#v, want timeout without stale rate-limit reclassification", err, result)
 	}
 }
 
