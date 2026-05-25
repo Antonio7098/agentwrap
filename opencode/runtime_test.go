@@ -502,6 +502,40 @@ func TestClassifyRateLimitDataParsesOpenCodeHeaders(t *testing.T) {
 	}
 }
 
+func TestClassifyRateLimitTextDetectsNestedErrorTypeWithoutRateLimitMessage(t *testing.T) {
+	stderr := `{"type":"error","message":"Model not found: opencode/gpt-5.5. Did you mean: gpt-5.5, gpt-5.5-pro?","error":{"type":"rate_limit_error","message":"usage limit exceeded","metadata":{"retry-after-ms":2000}}}`
+	classified := classifyRateLimitText("opencode run", stderr, agentwrap.RuntimeContext{Provider: "opencode", Model: "gpt-5.5"})
+	if classified == nil || classified.err == nil || classified.err.Category != agentwrap.ErrorRateLimit {
+		t.Fatalf("classification = %#v, want rate_limit", classified)
+	}
+	if classified.info == nil || classified.info.RetryAfter != 2*time.Second {
+		t.Fatalf("rate limit info = %#v, want retry after 2s", classified.info)
+	}
+}
+
+func TestClassifyRateLimitDataDetectsNestedErrorType(t *testing.T) {
+	classified := classifyRateLimitData("opencode event", map[string]any{
+		"type":    "error",
+		"message": "Model not found: opencode/gpt-5.5. Did you mean: gpt-5.5, gpt-5.5-pro?",
+		"error": map[string]any{
+			"type":    "rate_limit_error",
+			"message": "usage limit exceeded",
+			"metadata": map[string]any{
+				"retry-after-ms": 2000,
+			},
+		},
+	}, agentwrap.RuntimeContext{Provider: "opencode", Model: "gpt-5.5"})
+	if classified == nil || classified.err == nil || classified.err.Category != agentwrap.ErrorRateLimit {
+		t.Fatalf("classification = %#v, want rate_limit", classified)
+	}
+	if classified.info == nil || classified.info.Provider != "opencode" || classified.info.Model != "gpt-5.5" {
+		t.Fatalf("rate limit info = %#v", classified.info)
+	}
+	if classified.info.RetryAfter != 2*time.Second {
+		t.Fatalf("retry after = %s, want 2s", classified.info.RetryAfter)
+	}
+}
+
 func TestProjectNativeFatalErrorPromotesRateLimit(t *testing.T) {
 	record := nativeRecord{
 		Type: "error",

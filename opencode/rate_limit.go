@@ -23,6 +23,23 @@ func classifyRateLimitData(op string, data map[string]any, runtimeCtx agentwrap.
 	if len(data) == 0 {
 		return nil
 	}
+	if nested, ok := data["error"].(map[string]any); ok {
+		if strings.EqualFold(stringValue(nested["type"]), "rate_limit_error") {
+			message := stringValue(firstNonNil(nested["message"], data["message"]))
+			headers := headerMapFromAny(firstNonNil(nested["responseHeaders"], nested["headers"], data["responseHeaders"], data["headers"]))
+			body := stringValue(firstNonNil(nested["responseBody"], nested["body"], data["responseBody"], data["body"]))
+			metadata := stringMapFromAny(nested["metadata"])
+			if len(metadata) == 0 {
+				metadata = stringMapFromAny(data["metadata"])
+			}
+			status, _ := intFromAny(firstNonNil(nested["statusCode"], nested["status"], nested["code"], data["statusCode"], data["status"], data["code"]))
+			info := rateLimitInfoFrom(headers, metadata, runtimeCtx, body, message, "nested_error_type")
+			return &rateLimitClassification{
+				err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(body, message), nil, rateLimitErrorOptions(status, headers, body, metadata, runtimeCtx, info)...),
+				info: info,
+			}
+		}
+	}
 	message := messageFrom(data)
 	headers := headerMapFromAny(data["responseHeaders"])
 	if len(headers) == 0 {
@@ -153,6 +170,12 @@ func parseStructuredRateLimitText(text string) (status int, body, message string
 	headers = headerMapFromAny(firstNonNil(payload["responseHeaders"], payload["headers"]))
 	metadata = stringMapFromAny(payload["metadata"])
 	if errObj, ok := payload["error"].(map[string]any); ok {
+		if strings.EqualFold(stringValue(errObj["type"]), "rate_limit_error") {
+			message = stringValue(firstNonNil(errObj["message"], errObj["type"], message))
+			if body == "" {
+				body = stringValue(firstNonNil(errObj["body"], errObj["type"]))
+			}
+		}
 		if message == "" {
 			message = stringValue(firstNonNil(errObj["message"], errObj["type"], errObj["code"]))
 		}
@@ -183,6 +206,18 @@ func rateLimitInfoFrom(headers, metadata map[string]string, runtimeCtx agentwrap
 	}
 	if info.RetryAfter == 0 {
 		if retryAfter := firstNonEmptyCI(headers, "retry-after"); retryAfter != "" {
+			info.RetryAfter = parseRetryDelay(retryAfter)
+		}
+	}
+	if info.RetryAfter == 0 {
+		if retryAfter := firstNonEmptyCI(metadata, "retry-after-ms"); retryAfter != "" {
+			if ms, err := strconv.ParseInt(strings.TrimSpace(retryAfter), 10, 64); err == nil && ms > 0 {
+				info.RetryAfter = time.Duration(ms) * time.Millisecond
+			}
+		}
+	}
+	if info.RetryAfter == 0 {
+		if retryAfter := firstNonEmptyCI(metadata, "retry-after"); retryAfter != "" {
 			info.RetryAfter = parseRetryDelay(retryAfter)
 		}
 	}
