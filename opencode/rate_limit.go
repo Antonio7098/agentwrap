@@ -23,6 +23,23 @@ func classifyRateLimitData(op string, data map[string]any, runtimeCtx agentwrap.
 	if len(data) == 0 {
 		return nil
 	}
+	if nested, ok := data["error"].(map[string]any); ok {
+		if strings.EqualFold(stringValue(nested["type"]), "rate_limit_error") {
+			message := stringValue(firstNonNil(nested["message"], data["message"]))
+			headers := headerMapFromAny(firstNonNil(nested["responseHeaders"], nested["headers"], data["responseHeaders"], data["headers"]))
+			body := stringValue(firstNonNil(nested["responseBody"], nested["body"], data["responseBody"], data["body"]))
+			metadata := stringMapFromAny(nested["metadata"])
+			if len(metadata) == 0 {
+				metadata = stringMapFromAny(data["metadata"])
+			}
+			status, _ := intFromAny(firstNonNil(nested["statusCode"], nested["status"], nested["code"], data["statusCode"], data["status"], data["code"]))
+			info := rateLimitInfoFrom(headers, metadata, runtimeCtx, body, message, "nested_error_type")
+			return &rateLimitClassification{
+				err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(body, message), nil, rateLimitErrorOptions(status, headers, body, metadata, runtimeCtx, info)...),
+				info: info,
+			}
+		}
+	}
 	message := messageFrom(data)
 	headers := headerMapFromAny(data["responseHeaders"])
 	if len(headers) == 0 {
@@ -51,6 +68,7 @@ func classifyRateLimitPayload(op, text string, headers map[string]string, runtim
 }
 
 func classifyRateLimitDetails(op, message, body string, headers, metadata map[string]string, status int, runtimeCtx agentwrap.RuntimeContext) *rateLimitClassification {
+	body = expandNestedRateLimitBody(body)
 	normalizedBody := strings.ToLower(body)
 	normalizedMessage := strings.ToLower(message)
 	if status == 429 {
@@ -68,8 +86,8 @@ func classifyRateLimitDetails(op, message, body string, headers, metadata map[st
 			info: info,
 		}
 	}
-	if containsAny(normalizedBody, "gousagelimiterror", "too_many_requests", "\"rate_limit\"", "\"resource_exhausted\"", "\"unavailable\"") ||
-		containsAny(normalizedMessage, "rate limit", "too many requests", "rate increased too quickly", "provider is overloaded", "resource_exhausted", "too_many_requests") {
+	if containsAny(normalizedBody, "gousagelimiterror", "too_many_requests", "rate_limit_error", "usage limit exceeded", "\"rate_limit\"", "\"resource_exhausted\"", "\"unavailable\"") ||
+		containsAny(normalizedMessage, "rate limit", "too many requests", "usage limit exceeded", "rate_limit_error", "rate increased too quickly", "provider is overloaded", "resource_exhausted", "too_many_requests") {
 		info := rateLimitInfoFrom(headers, metadata, runtimeCtx, body, message, "message_or_body")
 		return &rateLimitClassification{
 			err:  agentwrap.NewError(agentwrap.ErrorRateLimit, op, userRateLimitDetail(body, message), nil, rateLimitErrorOptions(status, headers, body, metadata, runtimeCtx, info)...),
@@ -84,6 +102,42 @@ func classifyRateLimitDetails(op, message, body string, headers, metadata map[st
 		}
 	}
 	return nil
+}
+
+func expandNestedRateLimitBody(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return body
+	}
+	var payload any
+	if json.Unmarshal([]byte(body), &payload) != nil {
+		return body
+	}
+	parts := []string{body}
+	collectRateLimitStrings(payload, &parts)
+	return strings.Join(parts, "\n")
+}
+
+func collectRateLimitStrings(value any, parts *[]string) {
+	switch v := value.(type) {
+	case map[string]any:
+		for _, nested := range v {
+			collectRateLimitStrings(nested, parts)
+		}
+	case []any:
+		for _, nested := range v {
+			collectRateLimitStrings(nested, parts)
+		}
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return
+		}
+		*parts = append(*parts, v)
+		var nested any
+		if json.Unmarshal([]byte(v), &nested) == nil {
+			collectRateLimitStrings(nested, parts)
+		}
+	}
 }
 
 func rateLimitErrorOptions(status int, headers map[string]string, body string, metadata map[string]string, runtimeCtx agentwrap.RuntimeContext, info *agentwrap.RateLimitInfo) []agentwrap.ErrorOption {
@@ -116,6 +170,12 @@ func parseStructuredRateLimitText(text string) (status int, body, message string
 	headers = headerMapFromAny(firstNonNil(payload["responseHeaders"], payload["headers"]))
 	metadata = stringMapFromAny(payload["metadata"])
 	if errObj, ok := payload["error"].(map[string]any); ok {
+		if strings.EqualFold(stringValue(errObj["type"]), "rate_limit_error") {
+			message = stringValue(firstNonNil(errObj["message"], errObj["type"], message))
+			if body == "" {
+				body = stringValue(firstNonNil(errObj["body"], errObj["type"]))
+			}
+		}
 		if message == "" {
 			message = stringValue(firstNonNil(errObj["message"], errObj["type"], errObj["code"]))
 		}
@@ -146,6 +206,18 @@ func rateLimitInfoFrom(headers, metadata map[string]string, runtimeCtx agentwrap
 	}
 	if info.RetryAfter == 0 {
 		if retryAfter := firstNonEmptyCI(headers, "retry-after"); retryAfter != "" {
+			info.RetryAfter = parseRetryDelay(retryAfter)
+		}
+	}
+	if info.RetryAfter == 0 {
+		if retryAfter := firstNonEmptyCI(metadata, "retry-after-ms"); retryAfter != "" {
+			if ms, err := strconv.ParseInt(strings.TrimSpace(retryAfter), 10, 64); err == nil && ms > 0 {
+				info.RetryAfter = time.Duration(ms) * time.Millisecond
+			}
+		}
+	}
+	if info.RetryAfter == 0 {
+		if retryAfter := firstNonEmptyCI(metadata, "retry-after"); retryAfter != "" {
 			info.RetryAfter = parseRetryDelay(retryAfter)
 		}
 	}

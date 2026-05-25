@@ -2,9 +2,14 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +24,9 @@ var runCounter atomic.Int64
 // handle. The returned run owns the subprocess and event decoding state.
 func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agentwrap.Run, error) {
 	if err := validateSessionRequest(req); err != nil {
+		return nil, err
+	}
+	if err := validateProviderModelRequest(req); err != nil {
 		return nil, err
 	}
 	if err := r.requiredPreflight(ctx, req); err != nil {
@@ -56,6 +64,7 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 		permissions:  permissions.metadata,
 		stderrBuffer: newLimitBuffer(r.stderrLimit),
 		stderrDone:   make(chan struct{}),
+		dbQuery:      r.dbQuery,
 		lifecycle:    agentwrap.StatusStarting,
 	}
 	handle.emitPermissionAudit("policy_initialized")
@@ -161,6 +170,8 @@ type run struct {
 	eventMu            sync.Mutex
 	seq                int64
 	sawFinal           bool
+	sawIdle            bool
+	sawOutput          bool
 	sessionID          agentwrap.SessionID
 	artifacts          []agentwrap.ArtifactRef
 	warnings           []string
@@ -170,8 +181,11 @@ type run struct {
 	nativeTypes        map[string]int
 	categories         map[string]int
 	postFinalDecodeErr string
+	finishReason       string
+	terminalEvidence   string
 	stderrBuffer       *limitBuffer
 	stderrDone         chan struct{}
+	dbQuery            func(context.Context, agentwrap.SessionID, time.Time) (string, error)
 	now                clock
 }
 
@@ -191,10 +205,12 @@ func (r *run) Wait(ctx context.Context) (agentwrap.RunResult, error) {
 
 func (r *run) Cancel(ctx context.Context) error {
 	r.emitLifecycle(agentwrap.StatusCancelled, "caller_cancel")
-	cleanup := r.cleanup(ctx, "caller_cancel")
+	_ = r.cleanup(ctx, "caller_cancel")
 	r.cancel()
-	if cleanup.Error != nil {
-		return cleanup.Error
+	select {
+	case <-r.done:
+	case <-time.After(100 * time.Millisecond):
+	case <-ctx.Done():
 	}
 	return nil
 }
@@ -245,6 +261,18 @@ func (r *run) run() {
 		if projected.final {
 			r.sawFinal = true
 		}
+		if projected.idle {
+			r.sawIdle = true
+		}
+		if projected.finishReason != "" {
+			r.finishReason = projected.finishReason
+		}
+		if projected.terminalEvidence != "" {
+			r.terminalEvidence = projected.terminalEvidence
+		}
+		if projected.event.Kind() == agentwrap.EventMessage {
+			r.sawOutput = true
+		}
 		if projected.usage.Native != nil || projected.usage.InputTokens != nil || projected.usage.OutputTokens != nil || projected.usage.TotalTokens != nil {
 			r.usage = projected.usage
 		}
@@ -283,7 +311,18 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	var sdkErr *agentwrap.SDKError
 	if decodeErr != nil {
 		if errors.Is(decodeErr, context.Canceled) || errors.Is(decodeErr, context.DeadlineExceeded) {
-			sdkErr = classifyContextError(decodeErr, "opencode run")
+			if errors.Is(decodeErr, context.DeadlineExceeded) {
+				if classified := r.classifyRecentLogFailure(); classified != nil {
+					sdkErr = classified.err
+					if classified.info != nil {
+						r.rateLimit = classified.info
+					}
+				} else {
+					sdkErr = classifyContextError(decodeErr, "opencode run")
+				}
+			} else {
+				sdkErr = classifyContextError(decodeErr, "opencode run")
+			}
 			if sdkErr.Category == agentwrap.ErrorCancellation {
 				status = agentwrap.StatusCancelled
 			} else {
@@ -299,7 +338,18 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 			status = agentwrap.StatusFailed
 		}
 	} else if err := r.ctx.Err(); err != nil {
-		sdkErr = classifyContextError(err, "opencode run")
+		if errors.Is(err, context.DeadlineExceeded) {
+			if classified := r.classifyRecentLogFailure(); classified != nil {
+				sdkErr = classified.err
+				if classified.info != nil {
+					r.rateLimit = classified.info
+				}
+			} else {
+				sdkErr = classifyContextError(err, "opencode run")
+			}
+		} else {
+			sdkErr = classifyContextError(err, "opencode run")
+		}
 		if sdkErr.Category == agentwrap.ErrorCancellation {
 			status = agentwrap.StatusCancelled
 		} else {
@@ -319,6 +369,20 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	} else if proc.Err != nil || proc.ExitCode != 0 {
 		sdkErr = classifyExitError(proc, r.stderrBuffer.String())
 		status = agentwrap.StatusFailed
+	} else if r.sawIdle {
+		status = agentwrap.StatusCompleted
+	} else if r.sawOutput {
+		r.warnings = append(r.warnings, "OpenCode finished without a final structured result; treating assistant output on clean exit as completed")
+		status = agentwrap.StatusCompleted
+	} else if proof := r.reconcileFinalState(); proof.err != nil {
+		sdkErr = proof.err
+		status = agentwrap.StatusFailed
+	} else if proof.completed {
+		r.warnings = append(r.warnings, "OpenCode finished without a final structured result; recovered terminal finish from durable DB state")
+		if proof.usage.Native != nil || proof.usage.InputTokens != nil || proof.usage.OutputTokens != nil || proof.usage.TotalTokens != nil {
+			r.usage = proof.usage
+		}
+		status = agentwrap.StatusCompleted
 	} else {
 		sdkErr = agentwrap.NewError(agentwrap.ErrorRuntimeExit, "opencode run", "OpenCode finished without a final structured result", nil, agentwrap.WithDebugDetail(debugDetail(r.stderrBuffer.String())))
 		status = agentwrap.StatusFailed
@@ -347,6 +411,12 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	if r.postFinalDecodeErr != "" {
 		metadata.NativeMetadata["post_final_decode_warning"] = r.postFinalDecodeErr
 	}
+	if r.finishReason != "" {
+		metadata.NativeMetadata["finish_reason"] = r.finishReason
+	}
+	if r.terminalEvidence != "" {
+		metadata.NativeMetadata["native_terminal_evidence"] = r.terminalEvidence
+	}
 	if r.rateLimit != nil {
 		metadata.NativeMetadata["rate_limit_info"] = r.rateLimit
 	} else if sdkErr != nil && sdkErr.Category == agentwrap.ErrorRateLimit {
@@ -359,11 +429,10 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	}
 	if cleanup.Error != nil {
 		metadata.Errors = append(metadata.Errors, *cleanup.Error)
-		if sdkErr == nil {
-			sdkErr = cleanup.Error
-			status = agentwrap.StatusFailed
-			metadata.Status = status
-		}
+		warning := "OpenCode cleanup failed after run outcome was determined; preserving primary run outcome"
+		r.warnings = append(r.warnings, warning)
+		metadata.Warnings = r.warnings
+		metadata.NativeMetadata["cleanup_warning"] = warning
 	}
 	result := agentwrap.RunResult{
 		RunID:      r.id,
@@ -382,6 +451,207 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 		return result, sdkErr
 	}
 	return result, nil
+}
+
+type dbReconcileProof struct {
+	completed bool
+	usage     agentwrap.Usage
+	warning   string
+	err       *agentwrap.SDKError
+}
+
+func (r *run) reconcileFinalState() dbReconcileProof {
+	if (r.req.SessionID == "" && r.sessionID == "") || r.dbQuery == nil {
+		return dbReconcileProof{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	body, err := r.dbQuery(ctx, firstSessionID(r.sessionID, r.req.SessionID), r.started)
+	return reconcileDBResponse(body, err)
+}
+
+func (r *Runtime) queryOpenCodeDB(ctx context.Context, sessionID agentwrap.SessionID, since time.Time) (string, error) {
+	if sessionID == "" {
+		return "", nil
+	}
+	createdAtFilter := fmt.Sprintf("session_id=%s and time_created >= %d", sqlString(string(sessionID)), since.UnixMilli())
+	queries := map[string]string{
+		"session":  fmt.Sprintf("select * from session where id=%s", sqlString(string(sessionID))),
+		"messages": fmt.Sprintf("select * from message where %s order by time_created", createdAtFilter),
+		"parts":    fmt.Sprintf("select * from part where %s order by time_created", createdAtFilter),
+	}
+	combined := map[string]any{}
+	for key, query := range queries {
+		cmd := exec.CommandContext(ctx, r.executable, "db", "--format", "json", query)
+		if len(r.env) > 0 {
+			cmd.Env = append(os.Environ(), r.env...)
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", fmt.Errorf("opencode db %s query failed: %w: %s", key, err, strings.TrimSpace(string(out)))
+		}
+		var data any
+		if json.Unmarshal(out, &data) != nil {
+			combined[key] = string(out)
+			continue
+		}
+		combined[key] = data
+	}
+	body, err := json.Marshal(combined)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func sqlString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func reconcileDBResponse(body string, err error) dbReconcileProof {
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "locked") || strings.Contains(msg, "wal_checkpoint") || strings.Contains(msg, "database") {
+			return dbReconcileProof{err: agentwrap.NewError(agentwrap.ErrorRuntimeUnavailable, "opencode db", "OpenCode local DB is unavailable", err, agentwrap.WithDebugDetail(err.Error()))}
+		}
+		return dbReconcileProof{warning: err.Error()}
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return dbReconcileProof{}
+	}
+	var data any
+	if json.Unmarshal([]byte(body), &data) != nil {
+		return dbReconcileProof{warning: "OpenCode DB response was not JSON"}
+	}
+	usage := agentwrap.Usage{Native: map[string]any{"opencode_db": data}}
+	if dbHasTerminalAssistant(data, &usage) {
+		return dbReconcileProof{completed: true, usage: usage}
+	}
+	return dbReconcileProof{}
+}
+
+func dbHasTerminalAssistant(value any, usage *agentwrap.Usage) bool {
+	switch v := value.(type) {
+	case []any:
+		for _, item := range v {
+			if dbHasTerminalAssistant(item, usage) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"input_tokens", "inputTokens"} {
+			if n, ok := int64From(v[key]); ok && usage.InputTokens == nil {
+				usage.InputTokens = &n
+			}
+		}
+		for _, key := range []string{"output_tokens", "outputTokens"} {
+			if n, ok := int64From(v[key]); ok && usage.OutputTokens == nil {
+				usage.OutputTokens = &n
+			}
+		}
+		for _, key := range []string{"total_tokens", "totalTokens"} {
+			if n, ok := int64From(v[key]); ok && usage.TotalTokens == nil {
+				usage.TotalTokens = &n
+			}
+		}
+		role := strings.ToLower(stringValue(v["role"]))
+		finish := firstNonEmptyString(v["finish"], v["finishReason"], v["finish_reason"], v["stopReason"], v["stop_reason"])
+		if role == "assistant" && finish != "" {
+			return true
+		}
+		for _, nested := range v {
+			if dbHasTerminalAssistant(nested, usage) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func firstNonEmptyString(values ...any) string {
+	for _, value := range values {
+		if s := strings.TrimSpace(stringValue(value)); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func (r *run) classifyRecentLogFailure() *rateLimitClassification {
+	for _, path := range recentOpenCodeLogs(r.started) {
+		content, err := os.ReadFile(path)
+		if err != nil || len(content) == 0 {
+			continue
+		}
+		text := string(content)
+		if !logMayBelongToRun(text, r.context) {
+			continue
+		}
+		if classified := classifyRateLimitText("opencode run", text, r.context); classified != nil {
+			return classified
+		}
+	}
+	return nil
+}
+
+func recentOpenCodeLogs(cutoff time.Time) []string {
+	dirs := []string{}
+	if dataHome := os.Getenv("XDG_DATA_HOME"); dataHome != "" {
+		dirs = append(dirs, filepath.Join(dataHome, "opencode", "log"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		dirs = append(dirs, filepath.Join(home, ".local", "share", "opencode", "log"))
+	}
+	type candidate struct {
+		path string
+		mod  time.Time
+	}
+	var candidates []candidate
+	seen := map[string]bool{}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			if seen[path] {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || info.ModTime().Before(cutoff) {
+				continue
+			}
+			seen[path] = true
+			candidates = append(candidates, candidate{path: path, mod: info.ModTime()})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].mod.After(candidates[j].mod) })
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, candidate.path)
+	}
+	return out
+}
+
+func logMayBelongToRun(text string, ctx agentwrap.RuntimeContext) bool {
+	if ctx.Model == "" && ctx.Provider == "" {
+		return true
+	}
+	if ctx.Model != "" && strings.Contains(text, string(ctx.Model)) {
+		return true
+	}
+	if ctx.Provider != "" && strings.Contains(text, string(ctx.Provider)) {
+		return true
+	}
+	return false
 }
 
 func (r *run) postFinalDecodeWarning(err error) string {
@@ -415,7 +685,6 @@ func (r *run) cleanup(ctx context.Context, reason string) agentwrap.CleanupMetad
 		r.cleanupResult = agentwrap.CleanupMetadata{Attempted: true, Completed: procCleanup.Err == nil, Failed: procCleanup.Err != nil}
 		if procCleanup.Err != nil {
 			r.cleanupResult.Error = agentwrap.NewError(agentwrap.ErrorCleanup, "opencode cleanup", "OpenCode cleanup failed", procCleanup.Err, agentwrap.WithDebugDetail(procCleanup.Err.Error()))
-			r.emitLifecycle(agentwrap.StatusFailed, "cleanup_failed")
 			return
 		}
 	})
@@ -536,6 +805,7 @@ func observedSessionID(record nativeRecord) agentwrap.SessionID {
 	return firstSessionID(
 		agentwrap.SessionID(record.SessionID),
 		agentwrap.SessionID(stringValue(record.Data["sessionID"])),
+		agentwrap.SessionID(propertiesStringValue(record.Data, "sessionID")),
 		agentwrap.SessionID(stringValue(record.Data["session_id"])),
 	)
 }
@@ -636,6 +906,18 @@ func validateSessionRequest(req agentwrap.RunRequest) error {
 	default:
 		return unsupportedSessionAction(agentwrap.CapabilitySessions, fmt.Sprintf("unsupported session action %q", req.SessionAction))
 	}
+}
+
+func validateProviderModelRequest(req agentwrap.RunRequest) error {
+	provider := strings.TrimSpace(string(req.Provider))
+	model := strings.TrimSpace(string(req.Model))
+	if provider != "" && strings.Contains(provider, "/") {
+		return agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode model", "provider must not contain '/'", nil, agentwrap.WithProviderModel(req.Provider, req.Model))
+	}
+	if model != "" && strings.Count(model, "/") > 1 {
+		return agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode model", "model must be either a model id or provider/model", nil, agentwrap.WithProviderModel(req.Provider, req.Model))
+	}
+	return nil
 }
 
 func unsupportedSessionAction(capability agentwrap.Capability, reason string) error {

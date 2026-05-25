@@ -67,6 +67,13 @@ func withClock(now clock) Option {
 	}
 }
 
+func withDBQuery(query func(context.Context, agentwrap.SessionID, time.Time) (string, error)) Option {
+	return func(r *Runtime) {
+		r.dbQuery = query
+		r.dbQuerySet = true
+	}
+}
+
 // Runtime implements agentwrap.Runtime for the OpenCode CLI.
 type Runtime struct {
 	executable  string
@@ -74,6 +81,8 @@ type Runtime struct {
 	env         []string
 	stderrLimit int
 	runner      processRunner
+	dbQuery     func(context.Context, agentwrap.SessionID, time.Time) (string, error)
+	dbQuerySet  bool
 	now         clock
 }
 
@@ -89,6 +98,9 @@ func NewRuntime(options ...Option) *Runtime {
 	}
 	for _, opt := range options {
 		opt(r)
+	}
+	if !r.dbQuerySet && r.dbQuery == nil {
+		r.dbQuery = r.queryOpenCodeDB
 	}
 	return r
 }

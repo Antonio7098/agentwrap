@@ -19,18 +19,35 @@ type projectionInput struct {
 }
 
 type projectionResult struct {
-	event     agentwrap.Event
-	final     bool
-	usage     agentwrap.Usage
-	artifacts []agentwrap.ArtifactRef
-	warnings  []string
-	fatal     *agentwrap.SDKError
-	rateLimit *agentwrap.RateLimitInfo
+	event            agentwrap.Event
+	final            bool
+	idle             bool
+	usage            agentwrap.Usage
+	artifacts        []agentwrap.ArtifactRef
+	warnings         []string
+	fatal            *agentwrap.SDKError
+	rateLimit        *agentwrap.RateLimitInfo
+	finishReason     string
+	terminalEvidence string
 }
 
 func projectNative(in projectionInput) projectionResult {
 	record := in.record
 	category, typ := classify(record)
+	finishReason := finishReasonFrom(record.Data)
+	nativeType := strings.TrimSpace(record.Type)
+	idle := isSessionIdleStatus(record)
+	terminalEvidence := ""
+	if nativeType == "step_finish" {
+		if isTerminalFinish(finishReason) {
+			category = agentwrap.EventFinalResult
+			terminalEvidence = "step_finish"
+		} else {
+			category = agentwrap.EventProgress
+		}
+	} else if idle {
+		terminalEvidence = "session.status.idle"
+	}
 	payload := agentwrap.EventPayload{}
 	for k, v := range record.Data {
 		if k == "type" || k == "timestamp" {
@@ -42,10 +59,13 @@ func projectNative(in projectionInput) projectionResult {
 	payload["line"] = record.Line
 	payload["turn_id"] = string(in.turnID)
 	payload["context"] = in.ctx
+	if finishReason != "" {
+		payload["finish_reason"] = finishReason
+	}
 	event := agentwrap.Event{
 		ID:        agentwrap.EventID(fmt.Sprintf("%s:%d", in.runID, in.seq)),
 		RunID:     in.runID,
-		SessionID: firstSessionID(agentwrap.SessionID(record.SessionID), agentwrap.SessionID(stringValue(record.Data["sessionID"]))),
+		SessionID: firstSessionID(agentwrap.SessionID(record.SessionID), agentwrap.SessionID(stringValue(record.Data["sessionID"])), agentwrap.SessionID(propertiesStringValue(record.Data, "sessionID"))),
 		Time:      eventTime(record.Timestamp, in.now),
 		Type:      typ,
 		Payload:   agentwrap.EventPayloadWithKind(category, payload),
@@ -59,7 +79,7 @@ func projectNative(in projectionInput) projectionResult {
 	if event.SessionID == "" {
 		event.SessionID = agentwrap.SessionID(stringValue(record.Data["session_id"]))
 	}
-	result := projectionResult{event: event}
+	result := projectionResult{event: event, idle: idle, finishReason: finishReason, terminalEvidence: terminalEvidence}
 	if category == agentwrap.EventFinalResult {
 		result.final = true
 	}
@@ -81,10 +101,71 @@ func projectNative(in projectionInput) projectionResult {
 			result.rateLimit = classified.info
 			event.Payload["rate_limit"] = classified.info
 		} else {
-			result.fatal = agentwrap.NewError(agentwrap.ErrorRuntimeExit, "opencode event", "OpenCode reported a fatal session error", nil, agentwrap.WithDebugDetail(messageFrom(record.Data)))
+			result.fatal = classifyFatalEventError(record.Data, in.ctx)
 		}
 	}
 	return result
+}
+
+func finishReasonFrom(data map[string]any) string {
+	for _, key := range []string{"finish_reason", "finishReason", "stopReason", "stop_reason", "reason", "finish"} {
+		if value := stringValue(data[key]); value != "" {
+			return value
+		}
+	}
+	if part, ok := data["part"].(map[string]any); ok {
+		for _, key := range []string{"finish_reason", "finishReason", "stopReason", "stop_reason", "reason", "finish"} {
+			if value := stringValue(part[key]); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func isTerminalFinish(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "", "stop", "end_turn", "end-turn", "stop_sequence", "stop-sequence", "complete", "completed":
+		return true
+	case "tool_calls", "tool-calls", "tool_call", "tool-call", "tool", "max_tokens", "max-tokens", "length", "content_filter", "content-filter":
+		return false
+	default:
+		return false
+	}
+}
+
+func isSessionIdleStatus(record nativeRecord) bool {
+	if strings.TrimSpace(record.Type) != "session.status" {
+		return false
+	}
+	if strings.EqualFold(stringValue(record.Data["status"]), "idle") {
+		return true
+	}
+	if status, ok := record.Data["status"].(map[string]any); ok {
+		return strings.EqualFold(stringValue(status["type"]), "idle")
+	}
+	if properties, ok := record.Data["properties"].(map[string]any); ok {
+		if strings.EqualFold(stringValue(properties["status"]), "idle") {
+			return true
+		}
+		if status, ok := properties["status"].(map[string]any); ok {
+			return strings.EqualFold(stringValue(status["type"]), "idle")
+		}
+	}
+	return false
+}
+
+func classifyFatalEventError(data map[string]any, ctx agentwrap.RuntimeContext) *agentwrap.SDKError {
+	message := messageFrom(data)
+	normalized := strings.ToLower(message)
+	switch {
+	case strings.Contains(normalized, "model not found") || strings.Contains(normalized, "unknown model"):
+		return agentwrap.NewError(agentwrap.ErrorModelUnavailable, "opencode event", "OpenCode model is unavailable", nil, agentwrap.WithDebugDetail(message), agentwrap.WithProviderModel(ctx.Provider, ctx.Model), agentwrap.WithRuntimeKind(ctx.RuntimeKind))
+	case strings.Contains(normalized, "unauthorized") || strings.Contains(normalized, "authentication") || strings.Contains(normalized, "invalid api key") || strings.Contains(normalized, "api key"):
+		return agentwrap.NewError(agentwrap.ErrorAuthentication, "opencode event", "OpenCode provider authentication failed", nil, agentwrap.WithDebugDetail(message), agentwrap.WithProviderModel(ctx.Provider, ctx.Model), agentwrap.WithRuntimeKind(ctx.RuntimeKind))
+	default:
+		return agentwrap.NewError(agentwrap.ErrorRuntimeExit, "opencode event", "OpenCode reported a fatal session error", nil, agentwrap.WithDebugDetail(message), agentwrap.WithProviderModel(ctx.Provider, ctx.Model), agentwrap.WithRuntimeKind(ctx.RuntimeKind))
+	}
 }
 
 func classify(record nativeRecord) (agentwrap.EventKind, string) {
@@ -155,6 +236,14 @@ func firstSessionID(values ...agentwrap.SessionID) agentwrap.SessionID {
 func stringValue(value any) string {
 	s, _ := value.(string)
 	return s
+}
+
+func propertiesStringValue(data map[string]any, key string) string {
+	properties, ok := data["properties"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return stringValue(properties[key])
 }
 
 func messageFrom(data map[string]any) string {
