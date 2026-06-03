@@ -10,7 +10,7 @@ import (
 )
 
 func configureProcessGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
 }
 
 func signalProcessGroup(proc *os.Process, force bool) error {

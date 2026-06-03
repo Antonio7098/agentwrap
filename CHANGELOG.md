@@ -16,6 +16,7 @@ What changed:
 - Explicit provider failures such as rate-limit classifications still override a final event when the stderr evidence is strong.
 - Malformed structured output after an observed final event is recorded as warning/evidence instead of overturning the completed result.
 - OpenCode subprocesses now start in their own process group.
+- On Unix, OpenCode subprocesses now receive `SIGTERM` if the supervising parent process dies.
 - Cancellation cleanup now targets the process group with `SIGTERM` first and `SIGKILL` as a fallback.
 
 Why this matters:
@@ -27,11 +28,12 @@ Evidence from smoke testing:
 - Final structured events are now preserved as successful runs in the adapter tests.
 - Post-final malformed output now preserves the completed result while retaining diagnostic metadata.
 - The process cleanup path now has group-aware termination semantics instead of only signaling the direct child.
+- Unix parent-death signaling is covered by process attribute tests.
 - The smoke harness gained a configurable fake OpenCode peer so these boundary cases can be exercised deterministically.
 
 Deferred follow-up:
 
-- The current process-group implementation is Unix-specific because it relies on `syscall.SysProcAttr{Setpgid: true}` and negative-PID signaling. Windows build-tagged support is still deferred.
+- The current process-group and parent-death implementation is Unix-specific because it relies on `syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}` and negative-PID signaling. Windows build-tagged support is still deferred.
 
 ### OpenCode local runtime and DB failures are now classified explicitly
 
