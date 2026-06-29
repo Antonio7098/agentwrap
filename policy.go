@@ -532,12 +532,20 @@ func (r *policyRun) clearCurrent(run Run) {
 
 func (r *policyRun) forwardEvents(events <-chan Event, attempt, targetIndex int) {
 	for event := range events {
-		if event.Payload == nil {
-			event.Payload = EventPayload{}
+		payload := event.Payload
+		if payload == nil {
+			payload = EventPayload{}
+		} else {
+			clone := make(EventPayload, len(payload)+3)
+			for k, v := range payload {
+				clone[k] = v
+			}
+			payload = clone
 		}
-		event.Payload["policy_run_id"] = r.id
-		event.Payload["attempt"] = attempt
-		event.Payload["target_index"] = targetIndex
+		payload["policy_run_id"] = r.id
+		payload["attempt"] = attempt
+		payload["target_index"] = targetIndex
+		event.Payload = payload
 		r.sendEvent(event)
 	}
 }
