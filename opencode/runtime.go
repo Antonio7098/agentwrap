@@ -251,7 +251,8 @@ func (r *run) run() {
 		if projected.event.SessionID == "" {
 			projected.event.SessionID = r.req.SessionID
 		}
-		if projected.event.Kind() == agentwrap.EventPermission {
+		eventKind := projected.event.Kind()
+		if eventKind == agentwrap.EventPermission {
 			r.permissions.Audit = append(r.permissions.Audit, permissionAuditFromEvent(projected.event))
 		}
 		r.recordEventStats(projected.event)
@@ -270,7 +271,7 @@ func (r *run) run() {
 		if projected.terminalEvidence != "" {
 			r.terminalEvidence = projected.terminalEvidence
 		}
-		if projected.event.Kind() == agentwrap.EventMessage {
+		if eventKind == agentwrap.EventMessage {
 			r.sawOutput = true
 		}
 		if projected.usage.Native != nil || projected.usage.InputTokens != nil || projected.usage.OutputTokens != nil || projected.usage.TotalTokens != nil {
