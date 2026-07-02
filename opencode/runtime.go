@@ -82,6 +82,7 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 	handle.emitLifecycle(agentwrap.StatusRunning, "process_started")
 	go handle.captureStderr()
 	go handle.cancelOnContextDone()
+	go handle.watchLogRateLimits()
 	go handle.run()
 	return handle, nil
 }
@@ -177,6 +178,7 @@ type run struct {
 	warnings           []string
 	usage              agentwrap.Usage
 	rateLimit          *agentwrap.RateLimitInfo
+	liveRateLimitKey   string
 	permissions        agentwrap.PermissionMetadata
 	nativeTypes        map[string]int
 	categories         map[string]int
@@ -218,6 +220,25 @@ func (r *run) Cancel(ctx context.Context) error {
 func (r *run) captureStderr() {
 	defer close(r.stderrDone)
 	_, _ = io.Copy(r.stderrBuffer, r.proc.Stderr())
+}
+
+func (r *run) watchLogRateLimits() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-r.done:
+			return
+		case <-ticker.C:
+			classified := r.classifyRecentLogFailure()
+			if classified == nil {
+				continue
+			}
+			r.emitObservedRateLimit(classified)
+		}
+	}
 }
 
 func (r *run) cancelOnContextDone() {
@@ -764,6 +785,46 @@ func (r *run) emitPermissionAudit(reason string) {
 			"support":     r.permissions.Support,
 			"unsupported": r.permissions.Unsupported,
 			"audit":       r.permissions.Audit,
+		}),
+	}
+	if r.sendLocalEvent(event) {
+		r.recordEventStats(event)
+	}
+}
+
+func (r *run) emitObservedRateLimit(classified *rateLimitClassification) {
+	if classified == nil || classified.info == nil {
+		return
+	}
+	key := strings.Join([]string{
+		string(classified.info.Provider),
+		string(classified.info.Model),
+		classified.info.UserDetail,
+		classified.info.RetryAfter.String(),
+	}, "\x00")
+	r.eventMu.Lock()
+	if key == r.liveRateLimitKey {
+		r.eventMu.Unlock()
+		return
+	}
+	r.liveRateLimitKey = key
+	r.eventMu.Unlock()
+	seq := r.nextSequence()
+	event := agentwrap.Event{
+		ID:        agentwrap.EventID(fmt.Sprintf("%s:%d", r.id, seq)),
+		RunID:     r.id,
+		SessionID: firstSessionID(r.sessionID, r.req.SessionID),
+		Time:      r.now(),
+		Type:      "opencode.log.rate_limit",
+		Payload: agentwrap.EventPayloadWithKind(agentwrap.EventRateLimit, agentwrap.EventPayload{
+			"turn_id":     string(r.req.TurnID),
+			"context":     r.context,
+			"provider":    classified.info.Provider,
+			"model":       classified.info.Model,
+			"retry_after": classified.info.RetryAfter.String(),
+			"reset_at":    classified.info.ResetAt,
+			"detail":      classified.info.UserDetail,
+			"source":      "opencode.log",
 		}),
 	}
 	if r.sendLocalEvent(event) {
