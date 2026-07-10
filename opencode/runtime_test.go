@@ -1265,9 +1265,7 @@ func TestTimeoutWithRecentProviderErrorLogClassifiesRateLimit(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	logFilename := time.Now().Format("20060102T150405") + ".log"
 	logPath := filepath.Join(logDir, logFilename)
-	logContent := "INFO args=[\"run\",\"--model\",\"minimax-coding-plan/MiniMax-M2.7\"] opencode\n" +
-		"ERROR service=llm providerID=minimax-coding-plan modelID=MiniMax-M2.7 error={\"statusCode\":429,\"responseBody\":\"{\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"rate_limit_error\\\",\\\"message\\\":\\\"usage limit exceeded\\\"}}\"} stream error\n"
-	if err := os.WriteFile(logPath, []byte(logContent), 0644); err != nil {
+	if err := os.WriteFile(logPath, nil, 0644); err != nil {
 		t.Fatal(err)
 	}
 	proc := &fakeProcess{blockCh: make(chan struct{})}
@@ -1280,7 +1278,9 @@ func TestTimeoutWithRecentProviderErrorLogClassifiesRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(logPath, time.Now().Add(time.Second), time.Now().Add(time.Second)); err != nil {
+	logContent := "INFO args=[\"run\",\"--model\",\"minimax-coding-plan/MiniMax-M2.7\"] opencode\n" +
+		"ERROR service=llm providerID=minimax-coding-plan modelID=MiniMax-M2.7 error={\"statusCode\":429,\"responseBody\":\"{\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"rate_limit_error\\\",\\\"message\\\":\\\"usage limit exceeded\\\"}}\"} stream error\n"
+	if err := os.WriteFile(logPath, []byte(logContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 	eventCh := run.Events()
@@ -1430,5 +1430,57 @@ func TestRunEmptyStdoutFails(t *testing.T) {
 	_, result, err := drainRunErr(t, run)
 	if err == nil || result.Err == nil || result.Err.Category != agentwrap.ErrorRuntimeExit {
 		t.Fatalf("err = %v result=%#v, want runtime_exit for empty stdout", err, result)
+	}
+}
+
+func TestClassifyRecentLogFailureReadsOnlyBytesAppendedAfterRunStart(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	logDir := filepath.Join(dataHome, "opencode", "log")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(logDir, "opencode.log")
+	old := "provider=model rate limit from an earlier run\n"
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{
+		started:    time.Now().Add(-time.Second),
+		context:    agentwrap.RuntimeContext{Provider: "provider", Model: "model"},
+		logOffsets: map[string]int64{path: int64(len(old))},
+	}
+	if got := r.classifyRecentLogFailure(); got != nil {
+		t.Fatalf("classified pre-run log content: %#v", got)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("provider=model rate limit for current run\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.classifyRecentLogFailure(); got == nil || got.err.Category != agentwrap.ErrorRateLimit {
+		t.Fatalf("current-run rate limit not classified: %#v", got)
+	}
+}
+
+func TestReadOpenCodeLogDeltaIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.log")
+	content := bytes.Repeat([]byte("x"), maxOpenCodeLogScanBytes+1024)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readOpenCodeLogDelta(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != maxOpenCodeLogScanBytes {
+		t.Fatalf("read bytes = %d, want %d", len(got), maxOpenCodeLogScanBytes)
 	}
 }

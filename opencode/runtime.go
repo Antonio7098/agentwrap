@@ -61,6 +61,7 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 			Model:       req.Model,
 		},
 		now:          r.now,
+		logOffsets:   openCodeLogOffsets(),
 		permissions:  permissions.metadata,
 		stderrBuffer: newLimitBuffer(r.stderrLimit),
 		stderrDone:   make(chan struct{}),
@@ -189,6 +190,7 @@ type run struct {
 	stderrDone         chan struct{}
 	dbQuery            func(context.Context, agentwrap.SessionID, time.Time) (string, error)
 	now                clock
+	logOffsets         map[string]int64
 }
 
 func (r *run) ID() agentwrap.RunID            { return r.id }
@@ -605,7 +607,7 @@ func firstNonEmptyString(values ...any) string {
 
 func (r *run) classifyRecentLogFailure() *rateLimitClassification {
 	for _, path := range recentOpenCodeLogs(r.started) {
-		content, err := os.ReadFile(path)
+		content, err := readOpenCodeLogDelta(path, r.logOffsets[path])
 		if err != nil || len(content) == 0 {
 			continue
 		}
@@ -618,6 +620,41 @@ func (r *run) classifyRecentLogFailure() *rateLimitClassification {
 		}
 	}
 	return nil
+}
+
+const maxOpenCodeLogScanBytes = 256 * 1024
+
+func openCodeLogOffsets() map[string]int64 {
+	offsets := map[string]int64{}
+	for _, path := range recentOpenCodeLogs(time.Time{}) {
+		if info, err := os.Stat(path); err == nil {
+			offsets[path] = info.Size()
+		}
+	}
+	return offsets
+}
+
+func readOpenCodeLogDelta(path string, offset int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if offset < 0 || info.Size() < offset {
+		offset = 0
+	}
+	start := offset
+	if info.Size()-start > maxOpenCodeLogScanBytes {
+		start = info.Size() - maxOpenCodeLogScanBytes
+	}
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(io.LimitReader(file, maxOpenCodeLogScanBytes))
 }
 
 func recentOpenCodeLogs(cutoff time.Time) []string {
