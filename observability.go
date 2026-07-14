@@ -637,7 +637,7 @@ func firstContext(primary, fallback RuntimeContext) RuntimeContext {
 
 func firstUsage(values ...Usage) Usage {
 	for _, usage := range values {
-		if usage.InputTokens != nil || usage.OutputTokens != nil || usage.TotalTokens != nil || len(usage.Native) > 0 {
+		if usage.InputTokens != nil || usage.OutputTokens != nil || usage.TotalTokens != nil || usage.ReasoningTokens != nil || usage.CacheReadTokens != nil || usage.CacheWriteTokens != nil || usage.Turns != nil || len(usage.Native) > 0 {
 			return usage
 		}
 	}

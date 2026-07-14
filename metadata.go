@@ -211,10 +211,14 @@ type ArtifactRef struct {
 
 // Usage records best-effort usage values. Unknown values remain nil.
 type Usage struct {
-	InputTokens  *int64
-	OutputTokens *int64
-	TotalTokens  *int64
-	Native       map[string]any
+	InputTokens      *int64
+	OutputTokens     *int64
+	TotalTokens      *int64
+	ReasoningTokens  *int64
+	CacheReadTokens  *int64
+	CacheWriteTokens *int64
+	Turns            *int64
+	Native           map[string]any
 }
 
 // CostEstimate records best-effort cost metadata.

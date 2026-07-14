@@ -411,6 +411,10 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 		sdkErr = agentwrap.NewError(agentwrap.ErrorRuntimeExit, "opencode run", "OpenCode finished without a final structured result", nil, agentwrap.WithDebugDetail(debugDetail(r.stderrBuffer.String())))
 		status = agentwrap.StatusFailed
 	}
+	// OpenCode's durable message rows contain usage for providers that do not
+	// emit usage.update events. Enrich every outcome, including cancellation.
+	proof := r.reconcileFinalState()
+	r.usage = mergeUsage(r.usage, proof.usage)
 	metadata := agentwrap.RunMetadata{
 		Context:     r.context,
 		Status:      status,
@@ -432,6 +436,7 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 			"native_extension_count": r.categories[string(agentwrap.EventNativeExtension)],
 		},
 	}
+	metadata.EstimatedCost = proof.cost
 	if r.postFinalDecodeErr != "" {
 		metadata.NativeMetadata["post_final_decode_warning"] = r.postFinalDecodeErr
 	}
@@ -482,6 +487,7 @@ type dbReconcileProof struct {
 	usage     agentwrap.Usage
 	warning   string
 	err       *agentwrap.SDKError
+	cost      *agentwrap.CostEstimate
 }
 
 func (r *run) reconcileFinalState() dbReconcileProof {
@@ -551,11 +557,114 @@ func reconcileDBResponse(body string, err error) dbReconcileProof {
 	if json.Unmarshal([]byte(body), &data) != nil {
 		return dbReconcileProof{warning: "OpenCode DB response was not JSON"}
 	}
-	usage := agentwrap.Usage{Native: map[string]any{"opencode_db": data}}
-	if dbHasTerminalAssistant(data, &usage) {
-		return dbReconcileProof{completed: true, usage: usage}
+	metrics := dbMetrics{}
+	dbCollectMetrics(data, &metrics)
+	usage := agentwrap.Usage{Native: map[string]any{"source": "opencode_db"}}
+	if metrics.turns > 0 {
+		usage.Turns = int64Ptr(metrics.turns)
+		usage.InputTokens = int64Ptr(metrics.input)
+		usage.OutputTokens = int64Ptr(metrics.output)
+		usage.TotalTokens = int64Ptr(metrics.total)
+		usage.ReasoningTokens = int64Ptr(metrics.reasoning)
+		usage.CacheReadTokens = int64Ptr(metrics.cacheRead)
+		usage.CacheWriteTokens = int64Ptr(metrics.cacheWrite)
 	}
-	return dbReconcileProof{}
+	var cost *agentwrap.CostEstimate
+	if metrics.costKnown {
+		cost = &agentwrap.CostEstimate{Amount: metrics.cost, Currency: "USD", Estimate: false}
+	}
+	return dbReconcileProof{completed: metrics.turns > 0, usage: usage, cost: cost}
+}
+
+type dbMetrics struct {
+	turns, input, output, total, reasoning, cacheRead, cacheWrite int64
+	cost                                                          float64
+	costKnown                                                     bool
+}
+
+func int64Ptr(v int64) *int64 { return &v }
+func dbCollectMetrics(value any, m *dbMetrics) {
+	switch v := value.(type) {
+	case []any:
+		for _, item := range v {
+			dbCollectMetrics(item, m)
+		}
+	case string:
+		var nested any
+		if strings.HasPrefix(strings.TrimSpace(v), "{") && json.Unmarshal([]byte(v), &nested) == nil {
+			dbCollectMetrics(nested, m)
+		}
+	case map[string]any:
+		if strings.EqualFold(stringValue(v["role"]), "assistant") && finishReasonFrom(v) != "" {
+			m.turns++
+			if tokens, ok := v["tokens"].(map[string]any); ok {
+				m.input += number(tokens["input"])
+				m.output += number(tokens["output"])
+				m.reasoning += number(tokens["reasoning"])
+				m.total += number(tokens["total"])
+				if cache, ok := tokens["cache"].(map[string]any); ok {
+					m.cacheRead += number(cache["read"])
+					m.cacheWrite += number(cache["write"])
+				}
+			} else {
+				m.input += firstNumber(v, "input_tokens", "inputTokens")
+				m.output += firstNumber(v, "output_tokens", "outputTokens")
+				m.total += firstNumber(v, "total_tokens", "totalTokens")
+			}
+			if c, ok := float64From(v["cost"]); ok {
+				m.costKnown = true
+				m.cost += c
+			}
+			return
+		}
+		for _, nested := range v {
+			dbCollectMetrics(nested, m)
+		}
+	}
+}
+func number(v any) int64 { n, _ := int64From(v); return n }
+func firstNumber(values map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		if n, ok := int64From(values[key]); ok {
+			return n
+		}
+	}
+	return 0
+}
+func float64From(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
+}
+func mergeUsage(primary, fallback agentwrap.Usage) agentwrap.Usage {
+	if primary.InputTokens == nil {
+		primary.InputTokens = fallback.InputTokens
+	}
+	if primary.OutputTokens == nil {
+		primary.OutputTokens = fallback.OutputTokens
+	}
+	if primary.TotalTokens == nil {
+		primary.TotalTokens = fallback.TotalTokens
+	}
+	if primary.ReasoningTokens == nil {
+		primary.ReasoningTokens = fallback.ReasoningTokens
+	}
+	if primary.CacheReadTokens == nil {
+		primary.CacheReadTokens = fallback.CacheReadTokens
+	}
+	if primary.CacheWriteTokens == nil {
+		primary.CacheWriteTokens = fallback.CacheWriteTokens
+	}
+	if primary.Turns == nil {
+		primary.Turns = fallback.Turns
+	}
+	return primary
 }
 
 func dbHasTerminalAssistant(value any, usage *agentwrap.Usage) bool {

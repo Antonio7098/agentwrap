@@ -1196,6 +1196,20 @@ func TestReconcileDBResponseHandlesShapes(t *testing.T) {
 	}
 }
 
+func TestReconcileDBResponseExtractsNestedOpenCodeMetrics(t *testing.T) {
+	body := `{"messages":[{"id":"row-1","data":"{\"role\":\"assistant\",\"cost\":0,\"tokens\":{\"total\":104115,\"input\":317,\"output\":68,\"reasoning\":0,\"cache\":{\"read\":103730,\"write\":0}},\"time\":{\"created\":1,\"completed\":2},\"finish\":\"tool-calls\"}"},{"id":"row-2","data":"{\"role\":\"assistant\",\"cost\":0,\"tokens\":{\"total\":10,\"input\":3,\"output\":7},\"finish\":\"stop\"}"},{"id":"placeholder","data":"{\"role\":\"assistant\",\"cost\":0,\"tokens\":{\"total\":0}}"}]}`
+	proof := reconcileDBResponse(body, nil)
+	if !proof.completed || proof.usage.Turns == nil || *proof.usage.Turns != 2 {
+		t.Fatalf("turn metrics=%+v", proof)
+	}
+	if proof.usage.TotalTokens == nil || *proof.usage.TotalTokens != 104125 || proof.usage.CacheReadTokens == nil || *proof.usage.CacheReadTokens != 103730 {
+		t.Fatalf("usage=%+v", proof.usage)
+	}
+	if proof.cost == nil || proof.cost.Amount != 0 || proof.cost.Estimate {
+		t.Fatalf("cost=%+v", proof.cost)
+	}
+}
+
 func TestReconcileDBResponseLockedDBIsRuntimeUnavailable(t *testing.T) {
 	proof := reconcileDBResponse("", errors.New("database is locked during wal_checkpoint"))
 	if proof.err == nil || proof.err.Category != agentwrap.ErrorRuntimeUnavailable {
