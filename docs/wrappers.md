@@ -81,6 +81,8 @@ type Validator interface {
 - `MaxAttempts`
 - `SessionAction`
 - `AllowFreshSessionFallback`
+- `FreshSessionFallbackOnError` (fresh fallback for failed same-session repair;
+  cancellation, timeout, and permission failures remain terminal)
 - `ShouldRepair`
 - `BuildPrompt`
 - `OverrideRequest`
@@ -124,4 +126,3 @@ Required sink failures are returned from `Wait` when the primary runtime outcome
 ### Persistence Policy
 
 `PersistencePolicy.PersistUnsafeRawPayloads` controls whether unsafe raw native payload bytes may be retained. The default is false.
-

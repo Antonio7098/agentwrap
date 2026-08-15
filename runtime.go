@@ -47,17 +47,21 @@ type SandboxMode string
 
 // RunResult is the final caller-visible result for a run.
 type RunResult struct {
-	RunID      RunID
-	SessionID  SessionID
-	TurnID     TurnID
-	Status     RunStatus
-	Metadata   RunMetadata
-	Artifacts  []ArtifactRef
-	Warnings   []string
-	Usage      Usage
-	StartedAt  time.Time
-	FinishedAt time.Time
-	Err        *SDKError
+	RunID     RunID
+	SessionID SessionID
+	TurnID    TurnID
+	Status    RunStatus
+	// TerminalOutput is the last bounded assistant output observed by the
+	// adapter. It lets caller-defined validators inspect structured results
+	// without depending on runtime-native event payloads.
+	TerminalOutput string
+	Metadata       RunMetadata
+	Artifacts      []ArtifactRef
+	Warnings       []string
+	Usage          Usage
+	StartedAt      time.Time
+	FinishedAt     time.Time
+	Err            *SDKError
 }
 
 // Capabilities describes runtime-supported contract features.

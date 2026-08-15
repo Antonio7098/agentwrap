@@ -217,6 +217,7 @@ type run struct {
 	postFinalDecodeErr string
 	finishReason       string
 	terminalEvidence   string
+	terminalOutput     string
 	stderrBuffer       *limitBuffer
 	stderrDone         chan struct{}
 	dbQuery            func(context.Context, agentwrap.SessionID, time.Time) (string, error)
@@ -327,6 +328,11 @@ func (r *run) run() {
 		}
 		if eventKind == agentwrap.EventMessage {
 			r.sawOutput = true
+		}
+		if eventKind == agentwrap.EventMessage || eventKind == agentwrap.EventFinalResult {
+			if output := terminalOutputValue(projected.event.Payload, 0); output != "" {
+				r.terminalOutput = boundTerminalOutput(output)
+			}
 		}
 		if projected.usage.Native != nil || projected.usage.InputTokens != nil || projected.usage.OutputTokens != nil || projected.usage.TotalTokens != nil {
 			r.usage = projected.usage
@@ -495,22 +501,57 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 		metadata.NativeMetadata["cleanup_warning"] = warning
 	}
 	result := agentwrap.RunResult{
-		RunID:      r.id,
-		SessionID:  firstSessionID(r.sessionID, r.req.SessionID),
-		TurnID:     r.req.TurnID,
-		Status:     status,
-		Metadata:   metadata,
-		Artifacts:  r.artifacts,
-		Warnings:   r.warnings,
-		Usage:      r.usage,
-		StartedAt:  r.started,
-		FinishedAt: r.finished,
-		Err:        sdkErr,
+		RunID:          r.id,
+		SessionID:      firstSessionID(r.sessionID, r.req.SessionID),
+		TurnID:         r.req.TurnID,
+		Status:         status,
+		TerminalOutput: r.terminalOutput,
+		Metadata:       metadata,
+		Artifacts:      r.artifacts,
+		Warnings:       r.warnings,
+		Usage:          r.usage,
+		StartedAt:      r.started,
+		FinishedAt:     r.finished,
+		Err:            sdkErr,
 	}
 	if sdkErr != nil {
 		return result, sdkErr
 	}
 	return result, nil
+}
+
+const maxTerminalOutputBytes = 96 << 10
+
+func boundTerminalOutput(value string) string {
+	if len(value) <= maxTerminalOutputBytes {
+		return value
+	}
+	return value[len(value)-maxTerminalOutputBytes:]
+}
+
+func terminalOutputValue(value any, depth int) string {
+	if depth > 5 {
+		return ""
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"structured_output", "output", "content", "text", "message", "part"} {
+			if nested, ok := typed[key]; ok {
+				if output := terminalOutputValue(nested, depth+1); output != "" {
+					return output
+				}
+			}
+		}
+	case []any:
+		for i := len(typed) - 1; i >= 0; i-- {
+			if output := terminalOutputValue(typed[i], depth+1); output != "" {
+				return output
+			}
+		}
+	case string:
+		return typed
+	}
+	return ""
 }
 
 type dbReconcileProof struct {

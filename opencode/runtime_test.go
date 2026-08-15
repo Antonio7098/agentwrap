@@ -371,6 +371,9 @@ func TestRunSuccessEmitsCanonicalEventsAndResult(t *testing.T) {
 	if got := result.Metadata.NativeMetadata["stderr"]; got != "diagnostic" {
 		t.Fatalf("stderr metadata = %#v", got)
 	}
+	if result.TerminalOutput != "done" {
+		t.Fatalf("terminal output = %q, want done", result.TerminalOutput)
+	}
 }
 
 func TestRunUnknownEventDoesNotFail(t *testing.T) {

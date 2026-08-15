@@ -276,6 +276,38 @@ func TestValidatingRuntimeFreshSessionFallbackAfterUnsupportedSameSessionRepair(
 	}
 }
 
+func TestValidatingRuntimeFreshSessionFallbackAfterFailedSameSessionRepair(t *testing.T) {
+	dir := t.TempDir()
+	runtimeErr := NewError(ErrorRuntimeExit, "repair", "session ended", nil)
+	inner := &validationScriptRuntime{onStart: func(start int, _ RunRequest) {
+		if start == 3 {
+			mustWriteFile(t, filepath.Join(dir, "out.txt"), "fixed")
+		}
+	}, results: []validationScriptResult{{}, {err: runtimeErr}, {}}}
+	runner := ValidatingRuntime{Runtime: inner, Spec: ValidationSpec{
+		Expectations: []ValidationExpectation{{ID: "out", Kind: ExpectationFile, Path: "out.txt"}},
+		Repair: RepairConfig{
+			MaxAttempts:                 1,
+			AllowFreshSessionFallback:   true,
+			FreshSessionFallbackOnError: true,
+		},
+	}}
+	run, err := runner.StartRun(context.Background(), RunRequest{WorkDir: dir, SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	result, err := run.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if len(inner.requests) != 3 || inner.requests[2].SessionAction != SessionActionFresh || inner.requests[2].SessionID != "" {
+		t.Fatalf("requests = %#v, want fresh fallback after failed continue", inner.requests)
+	}
+	if got := result.Metadata.Repair.Attempts[0].PolicyDecisionReason; got != "fresh session fallback after failed same-session repair" {
+		t.Fatalf("fallback reason = %q", got)
+	}
+}
+
 type captureValidationPolicy struct {
 	validation *ValidationResult
 }

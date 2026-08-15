@@ -120,9 +120,13 @@ type RepairConfig struct {
 	MaxAttempts               int
 	SessionAction             SessionAction
 	AllowFreshSessionFallback bool
-	ShouldRepair              func(RepairContext) bool
-	BuildPrompt               func(RepairContext) string
-	OverrideRequest           func(RepairContext, RunRequest) RunRequest
+	// FreshSessionFallbackOnError retries a failed same-session repair once in
+	// a fresh session. Cancellation, timeout, and permission failures are not
+	// eligible because changing sessions cannot correct them safely.
+	FreshSessionFallbackOnError bool
+	ShouldRepair                func(RepairContext) bool
+	BuildPrompt                 func(RepairContext) string
+	OverrideRequest             func(RepairContext, RunRequest) RunRequest
 }
 
 // RepairContext contains safe repair prompt inputs.
@@ -365,24 +369,32 @@ func (r *validationRun) runRepair(req RunRequest, repairCtx RepairContext) (RunR
 	if result.Err != nil {
 		summary.ErrorCategory = result.Err.Category
 	}
-	if result.Metadata.Session.Relationship == SessionRelationshipUnsupported && repairReq.SessionAction == SessionActionContinue {
+	unsupportedContinue := result.Metadata.Session.Relationship == SessionRelationshipUnsupported && repairReq.SessionAction == SessionActionContinue
+	failedContinue := err != nil && repairReq.SessionAction == SessionActionContinue && r.spec.Repair.FreshSessionFallbackOnError && freshRepairFallbackAllowed(firstSDKError(result.Err, err))
+	if unsupportedContinue || failedContinue {
 		if r.spec.Repair.AllowFreshSessionFallback {
 			fallbackReq := repairReq
 			fallbackReq.SessionAction = SessionActionFresh
 			fallbackReq.SessionID = ""
 			result, err = r.startAndWait(fallbackReq)
 			summary = repairSummary(repairCtx.Attempt, r.id, fallbackReq, started, result)
-			summary.UnsupportedSession = true
-			summary.PolicyDecisionReason = "fresh session fallback after unsupported same-session repair"
+			summary.UnsupportedSession = unsupportedContinue
+			if unsupportedContinue {
+				summary.PolicyDecisionReason = "fresh session fallback after unsupported same-session repair"
+			} else {
+				summary.PolicyDecisionReason = "fresh session fallback after failed same-session repair"
+			}
 		} else {
-			summary.UnsupportedSession = true
-			unsupportedErr := NewError(ErrorRepairExhausted, "validation repair", "same-session repair is unsupported", nil, WithDebugDetail(result.Metadata.Session.UnsupportedReason))
-			err = unsupportedErr
-			result.Err = unsupportedErr
-			result.Status = StatusFailed
-			summary.Status = StatusFailed
-			summary.Error = unsupportedErr
-			summary.ErrorCategory = unsupportedErr.Category
+			if unsupportedContinue {
+				summary.UnsupportedSession = true
+				unsupportedErr := NewError(ErrorRepairExhausted, "validation repair", "same-session repair is unsupported", nil, WithDebugDetail(result.Metadata.Session.UnsupportedReason))
+				err = unsupportedErr
+				result.Err = unsupportedErr
+				result.Status = StatusFailed
+				summary.Status = StatusFailed
+				summary.Error = unsupportedErr
+				summary.ErrorCategory = unsupportedErr.Category
+			}
 		}
 	}
 	if err != nil {
@@ -392,6 +404,18 @@ func (r *validationRun) runRepair(req RunRequest, repairCtx RepairContext) (RunR
 	}
 	r.sendEvent(Event{RunID: r.id, SessionID: result.SessionID, Type: "repair.completed", Payload: EventPayloadWithKind(EventValidation, EventPayload{"attempt": repairCtx.Attempt})})
 	return result, summary, nil
+}
+
+func freshRepairFallbackAllowed(err *SDKError) bool {
+	if err == nil {
+		return false
+	}
+	switch err.Category {
+	case ErrorCancellation, ErrorTimeout, ErrorPermission:
+		return false
+	default:
+		return true
+	}
 }
 
 func repairSummary(attempt int, parent RunID, req RunRequest, started time.Time, result RunResult) RepairAttemptSummary {
