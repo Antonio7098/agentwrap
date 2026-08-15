@@ -56,6 +56,8 @@ The SDK records safe request facts in metadata but avoids storing large or sensi
 
 - `RunID`, `SessionID`, `TurnID`: identity.
 - `Status`: `starting`, `running`, `validating`, `repairing`, `completed`, `failed`, or `cancelled`.
+- `TerminalOutput`: the last bounded assistant output observed by the adapter,
+  suitable for caller-owned structured-result validation.
 - `Metadata`: dashboard and audit metadata.
 - `Artifacts`: durable output references.
 - `Warnings`: user-safe warnings.
@@ -117,4 +119,3 @@ Best-effort means the adapter passed session intent to the runtime but cannot pr
 - `Metadata`
 
 Wrappers may add producer metadata such as source run, runtime kind, runtime name, provider, and model.
-

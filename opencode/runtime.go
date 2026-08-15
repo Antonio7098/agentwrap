@@ -331,7 +331,7 @@ func (r *run) run() {
 		}
 		if eventKind == agentwrap.EventMessage || eventKind == agentwrap.EventFinalResult {
 			if output := terminalOutputValue(projected.event.Payload, 0); output != "" {
-				r.terminalOutput = boundTerminalOutput(output)
+				r.terminalOutput = appendTerminalOutput(r.terminalOutput, output)
 			}
 		}
 		if projected.usage.Native != nil || projected.usage.InputTokens != nil || projected.usage.OutputTokens != nil || projected.usage.TotalTokens != nil {
@@ -527,6 +527,16 @@ func boundTerminalOutput(value string) string {
 		return value
 	}
 	return value[len(value)-maxTerminalOutputBytes:]
+}
+
+func appendTerminalOutput(current, next string) string {
+	if current == "" || strings.HasPrefix(next, current) {
+		return boundTerminalOutput(next)
+	}
+	if next == current || strings.HasSuffix(current, next) {
+		return current
+	}
+	return boundTerminalOutput(current + next)
 }
 
 func terminalOutputValue(value any, depth int) string {

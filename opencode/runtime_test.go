@@ -376,6 +376,18 @@ func TestRunSuccessEmitsCanonicalEventsAndResult(t *testing.T) {
 	}
 }
 
+func TestAppendTerminalOutputHandlesDeltasAndCumulativeUpdates(t *testing.T) {
+	if got := appendTerminalOutput("{\"schema", "Version\":1}"); got != "{\"schemaVersion\":1}" {
+		t.Fatalf("delta output = %q", got)
+	}
+	if got := appendTerminalOutput("partial", "partial complete"); got != "partial complete" {
+		t.Fatalf("cumulative output = %q", got)
+	}
+	if got := appendTerminalOutput("complete", "complete"); got != "complete" {
+		t.Fatalf("duplicate output = %q", got)
+	}
+}
+
 func TestRunUnknownEventDoesNotFail(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "unknown.ndjson")}}
 	rt := NewRuntime(withProcessRunner(runner))
