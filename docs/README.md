@@ -12,6 +12,7 @@ This documentation is the canonical guide for the current repository state.
 - [Errors, Config, And Health](errors-config-health.md): classified errors, effective config, and preflight checks.
 - [Wrappers](wrappers.md): resilience policy execution, validation and repair, observability, sinks, and stores.
 - [OpenCode Adapter](opencode-adapter.md): CLI invocation, structured output projection, permissions, sessions, health, and limits.
+- [Muse Code Adapter Spike](muse-adapter.md): observed CLI contract, JSONL event semantics, session behavior, capability boundaries, and remaining live tests.
 - [Integration Guide](integration-guide.md): recommended composition patterns and examples.
 - [Development](development.md): test strategy, fixtures, and repository guardrails.
 
