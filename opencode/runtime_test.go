@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Antonio7098/agentwrap"
 )
@@ -111,6 +112,35 @@ func TestStartRunBuildsStructuredCommand(t *testing.T) {
 	}
 	if runner.spec.WorkDir != "/tmp/work" || runner.spec.Executable != "/bin/opencode" {
 		t.Fatalf("bad spec: %#v", runner.spec)
+	}
+}
+
+func TestStartRunChunksLargePromptAtRuneBoundaries(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	prompt := string(bytes.Repeat([]byte("a"), maxArgLen-1)) + "€" + string(bytes.Repeat([]byte("b"), maxArgLen))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = drainRun(t, run)
+
+	chunks := runner.spec.Args[3:]
+	if len(chunks) < 2 {
+		t.Fatalf("prompt chunks = %d, want at least 2", len(chunks))
+	}
+	var rebuilt bytes.Buffer
+	for i, chunk := range chunks {
+		if len(chunk) > maxArgLen {
+			t.Fatalf("chunk %d length = %d, want <= %d", i, len(chunk), maxArgLen)
+		}
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is not valid UTF-8", i)
+		}
+		rebuilt.WriteString(chunk)
+	}
+	if got := rebuilt.String(); got != prompt {
+		t.Fatalf("rebuilt prompt length = %d, want %d", len(got), len(prompt))
 	}
 }
 
