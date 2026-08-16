@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -278,43 +279,56 @@ func TestStartRunRejectsModelWithTooManySlashes(t *testing.T) {
 	}
 }
 
-func TestStartRunRejectsRequiredUnsupportedPathPermission(t *testing.T) {
-	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
-	rt := NewRuntime(withProcessRunner(runner))
-	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
-		Prompt: "hello",
-		PermissionPolicy: &agentwrap.PermissionPolicy{
-			PathRules: []agentwrap.PermissionPathRule{{Path: "/tmp/outside", Action: agentwrap.PermissionActionDeny}},
-		},
-	})
-	if err == nil {
-		t.Fatal("StartRun error = nil, want unsupported permission error")
-	}
-	var sdkErr *agentwrap.SDKError
-	if !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
-		t.Fatalf("error = %#v, want configuration SDKError", err)
-	}
-	if runner.starts != 0 {
-		t.Fatalf("process starts = %d, want 0", runner.starts)
-	}
-}
-
-func TestStartRunAllowsBestEffortUnsupportedPathPermission(t *testing.T) {
+func TestStartRunInjectsNativePathPermission(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
 	rt := NewRuntime(withProcessRunner(runner))
 	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
 		Prompt: "hello",
 		PermissionPolicy: &agentwrap.PermissionPolicy{
-			UnsupportedBehavior: agentwrap.PermissionUnsupportedBestEffort,
-			PathRules:           []agentwrap.PermissionPathRule{{Path: "/tmp/outside", Action: agentwrap.PermissionActionDeny}},
+			Default:   agentwrap.PermissionActionAsk,
+			PathRules: []agentwrap.PermissionPathRule{{Path: "/tmp/outside/**", Action: agentwrap.PermissionActionAllow}},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, result := drainRun(t, run)
-	if len(result.Metadata.Permissions.Unsupported) != 1 {
+	if len(result.Metadata.Permissions.Unsupported) != 0 {
 		t.Fatalf("unsupported metadata = %#v", result.Metadata.Permissions.Unsupported)
+	}
+	var content map[string]any
+	for _, value := range runner.spec.Env {
+		if strings.HasPrefix(value, opencodeConfigContentEnv) {
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(value, opencodeConfigContentEnv)), &content); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	permission := content["permission"].(map[string]any)
+	paths := permission["external_directory"].(map[string]any)
+	if paths["*"] != "ask" || paths["/tmp/outside/**"] != "allow" {
+		t.Fatalf("external_directory = %#v", paths)
+	}
+}
+
+func TestStartRunPathPermissionDoesNotRequireBestEffort(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			PathRules: []agentwrap.PermissionPathRule{{Path: "/tmp/outside", Action: agentwrap.PermissionActionDeny}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if len(result.Metadata.Permissions.Unsupported) != 0 {
+		t.Fatalf("unsupported metadata = %#v", result.Metadata.Permissions.Unsupported)
+	}
+	if len(result.Metadata.Permissions.Support) != 1 || result.Metadata.Permissions.Support[0].Enforcement != agentwrap.PermissionEnforcementNative {
+		t.Fatalf("support metadata = %#v", result.Metadata.Permissions.Support)
 	}
 }
 

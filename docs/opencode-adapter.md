@@ -113,7 +113,7 @@ Supported SDK tool mappings include:
 
 Default policy actions are expanded across known native tools. Tool-specific actions override individual tools.
 
-Path-level rules are not enforceable by the current subprocess adapter. They fail before launch unless `PermissionUnsupportedBestEffort` is configured.
+Path-level rules map to OpenCode's native `external_directory` path-pattern permission object. When a default or tool-level `external_directory` action is also present, it is retained as the `*` fallback and path rules override it.
 
 If existing `OPENCODE_CONFIG_CONTENT` is provided through `WithEnv`, it must be valid JSON and its `permission` value, when present, must be an object.
 
@@ -149,4 +149,3 @@ The adapter reports support for:
 - best-effort session continuation
 
 It reports no support for full retained-session lifecycle, fork, replace, release, or native validation events.
-

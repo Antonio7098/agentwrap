@@ -31,7 +31,7 @@ var opencodePermissionTools = map[agentwrap.PermissionTool]string{
 }
 
 type permissionTranslation struct {
-	config   map[string]string
+	config   map[string]any
 	metadata agentwrap.PermissionMetadata
 }
 
@@ -45,7 +45,7 @@ func translatePermissions(req agentwrap.RunRequest) (permissionTranslation, erro
 	}
 	metadata.Policy = req.PermissionPolicy.Summary()
 	metadata.PolicyID = metadata.Policy.ID
-	permissionConfig := map[string]string{}
+	permissionConfig := map[string]any{}
 	if req.PermissionPolicy.Default != agentwrap.PermissionActionDefault {
 		for _, nativeTool := range opencodePermissionTools {
 			permissionConfig[nativeTool] = string(req.PermissionPolicy.Default)
@@ -85,12 +85,27 @@ func translatePermissions(req agentwrap.RunRequest) (permissionTranslation, erro
 		})
 	}
 	for _, rule := range req.PermissionPolicy.PathRules {
-		unsupported := unsupportedFeature("path:"+rule.Path, req.PermissionPolicy.UnsupportedBehavior, "OpenCode static permission config cannot enforce SDK path-level rules in subprocess mode")
-		metadata.Support = append(metadata.Support, unsupported)
-		metadata.Unsupported = append(metadata.Unsupported, unsupported)
-		if req.PermissionPolicy.UnsupportedBehavior != agentwrap.PermissionUnsupportedBestEffort {
-			return permissionTranslation{}, unsupportedPermissionError(unsupported)
+		paths, ok := permissionConfig["external_directory"].(map[string]any)
+		if !ok {
+			paths = map[string]any{}
+			if fallback, exists := permissionConfig["external_directory"]; exists {
+				paths["*"] = fallback
+			}
 		}
+		paths[rule.Path] = string(rule.Action)
+		permissionConfig["external_directory"] = paths
+		metadata.Support = append(metadata.Support, agentwrap.PermissionFeatureSupport{
+			Feature:     "path:" + rule.Path,
+			Enforcement: agentwrap.PermissionEnforcementNative,
+			Reason:      "mapped to OpenCode external_directory path permissions",
+		})
+		metadata.Audit = append(metadata.Audit, agentwrap.PermissionAudit{
+			Source:      "opencode.config",
+			Tool:        agentwrap.PermissionToolExternalDirectory,
+			Action:      rule.Action,
+			Enforcement: agentwrap.PermissionEnforcementNative,
+			Reason:      "initialized from SDK path permission rule",
+		})
 	}
 	if len(permissionConfig) == 0 {
 		return permissionTranslation{metadata: metadata}, nil
@@ -110,7 +125,7 @@ func unsupportedPermissionError(feature agentwrap.PermissionFeatureSupport) *age
 	return agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode permissions", feature.Reason, nil, agentwrap.WithDebugDetail(feature.Feature))
 }
 
-func mergeEnv(base []string, permissionConfig map[string]string) ([]string, error) {
+func mergeEnv(base []string, permissionConfig map[string]any) ([]string, error) {
 	if len(permissionConfig) == 0 {
 		return append([]string(nil), base...), nil
 	}

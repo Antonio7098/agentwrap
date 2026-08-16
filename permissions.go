@@ -60,9 +60,8 @@ const (
 	PermissionEnforcementUnsupported PermissionEnforcement = "unsupported"
 )
 
-// PermissionPathRule is reserved for path-level policy. The first OpenCode
-// subprocess implementation classifies these before launch instead of silently
-// pretending native config can enforce them.
+// PermissionPathRule applies an action to a filesystem path pattern. Adapters
+// translate it to their native path-level permission mechanism when available.
 type PermissionPathRule struct {
 	Path   string
 	Action PermissionAction
