@@ -452,6 +452,12 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 	// emit usage.update events. Enrich every outcome, including cancellation.
 	proof := r.reconcileFinalState()
 	r.usage = mergeUsage(r.usage, proof.usage)
+	if proof.terminalOutput != "" {
+		// The durable assistant text is authoritative. Some OpenCode versions
+		// omit text events from JSON output or interleave reasoning into the
+		// streamed terminal buffer even though the final text is committed.
+		r.terminalOutput = proof.terminalOutput
+	}
 	metadata := agentwrap.RunMetadata{
 		Context:     r.context,
 		Status:      status,
@@ -565,11 +571,12 @@ func terminalOutputValue(value any, depth int) string {
 }
 
 type dbReconcileProof struct {
-	completed bool
-	usage     agentwrap.Usage
-	warning   string
-	err       *agentwrap.SDKError
-	cost      *agentwrap.CostEstimate
+	completed      bool
+	usage          agentwrap.Usage
+	terminalOutput string
+	warning        string
+	err            *agentwrap.SDKError
+	cost           *agentwrap.CostEstimate
 }
 
 func (r *run) reconcileFinalState() dbReconcileProof {
@@ -587,10 +594,15 @@ func (r *Runtime) queryOpenCodeDB(ctx context.Context, sessionID agentwrap.Sessi
 		return "", nil
 	}
 	createdAtFilter := fmt.Sprintf("session_id=%s and time_created >= %d", sqlString(string(sessionID)), since.UnixMilli())
+	assistantTextFilter := fmt.Sprintf("p.session_id=%s and p.time_created >= %d", sqlString(string(sessionID)), since.UnixMilli())
 	queries := map[string]string{
 		"session":  fmt.Sprintf("select * from session where id=%s", sqlString(string(sessionID))),
 		"messages": fmt.Sprintf("select * from message where %s order by time_created", createdAtFilter),
 		"parts":    fmt.Sprintf("select * from part where %s order by time_created", createdAtFilter),
+		"assistant_text": fmt.Sprintf(
+			"select json_extract(p.data,'$.text') as text from part p join message m on m.id=p.message_id where %s and json_extract(m.data,'$.role')='assistant' and json_extract(p.data,'$.type')='text' order by p.time_created",
+			assistantTextFilter,
+		),
 	}
 	combined := map[string]any{}
 	for key, query := range queries {
@@ -655,7 +667,29 @@ func reconcileDBResponse(body string, err error) dbReconcileProof {
 	if metrics.costKnown {
 		cost = &agentwrap.CostEstimate{Amount: metrics.cost, Currency: "USD", Estimate: false}
 	}
-	return dbReconcileProof{completed: metrics.turns > 0, usage: usage, cost: cost}
+	return dbReconcileProof{completed: metrics.turns > 0, usage: usage, terminalOutput: dbAssistantText(data), cost: cost}
+}
+
+func dbAssistantText(value any) string {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	rows, ok := root["assistant_text"].([]any)
+	if !ok {
+		return ""
+	}
+	var output string
+	for _, row := range rows {
+		fields, ok := row.(map[string]any)
+		if !ok {
+			continue
+		}
+		if text := stringValue(fields["text"]); text != "" {
+			output = appendTerminalOutput(output, text)
+		}
+	}
+	return output
 }
 
 type dbMetrics struct {

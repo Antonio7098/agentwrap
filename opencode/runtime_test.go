@@ -1216,13 +1216,15 @@ func TestRunCleanExitNoFinalNoOutputNoDBFinishFails(t *testing.T) {
 
 func TestReconcileDBResponseHandlesShapes(t *testing.T) {
 	tests := []struct {
-		name      string
-		body      string
-		wantDone  bool
-		wantTotal int64
+		name       string
+		body       string
+		wantDone   bool
+		wantTotal  int64
+		wantOutput string
 	}{
 		{name: "messages", body: `{"messages":[{"role":"assistant","finish":"stop","total_tokens":9}]}`, wantDone: true, wantTotal: 9},
 		{name: "parts", body: `[{"role":"assistant","finishReason":"stop","totalTokens":11}]`, wantDone: true, wantTotal: 11},
+		{name: "assistant text", body: `{"assistant_text":[{"text":"reasoning-free "},{"text":"{\"schemaVersion\":1}"}]}`, wantOutput: `reasoning-free {"schemaVersion":1}`},
 		{name: "no assistant finish", body: `{"messages":[{"role":"user","finish":"stop"}]}`},
 		{name: "non json", body: `not json`},
 	}
@@ -1236,6 +1238,9 @@ func TestReconcileDBResponseHandlesShapes(t *testing.T) {
 				if proof.usage.TotalTokens == nil || *proof.usage.TotalTokens != tt.wantTotal {
 					t.Fatalf("usage=%#v, want total %d", proof.usage, tt.wantTotal)
 				}
+			}
+			if proof.terminalOutput != tt.wantOutput {
+				t.Fatalf("terminal output=%q, want %q", proof.terminalOutput, tt.wantOutput)
 			}
 		})
 	}
