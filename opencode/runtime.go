@@ -156,7 +156,7 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTr
 	}
 	if req.Provider != "" || req.Model != "" {
 		model := string(req.Model)
-		if req.Provider != "" && !strings.Contains(model, "/") {
+		if req.Provider != "" && !strings.HasPrefix(model, string(req.Provider)+"/") {
 			model = string(req.Provider) + "/" + model
 		}
 		if model != "" {

@@ -116,6 +116,24 @@ func TestStartRunBuildsStructuredCommand(t *testing.T) {
 	}
 }
 
+func TestStartRunPreservesProviderForNestedModelID(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:   "hello",
+		Provider: "openrouter",
+		Model:    "stealth/ox-alpha",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = drainRun(t, run)
+	want := []string{"run", "--format", "json", "--model", "openrouter/stealth/ox-alpha", "hello"}
+	if !equalStrings(runner.spec.Args, want) {
+		t.Fatalf("args = %#v, want %#v", runner.spec.Args, want)
+	}
+}
+
 func TestStartRunChunksLargePromptAtRuneBoundaries(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
 	rt := NewRuntime(withProcessRunner(runner))
