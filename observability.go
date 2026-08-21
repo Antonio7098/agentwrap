@@ -92,6 +92,8 @@ type SinkFailure struct {
 // PersistencePolicy controls what the observing wrapper may retain.
 type PersistencePolicy struct {
 	PersistUnsafeRawPayloads bool
+	OmitSafeRawPayloads      bool
+	RunUpsertInterval        time.Duration
 }
 
 // EventSink consumes ordered event records. Implementations should treat calls
@@ -207,16 +209,17 @@ func (r ObservingRuntime) ListRunEvents(ctx context.Context, id RunID) ([]RunEve
 }
 
 type observedRun struct {
-	inner  Run
-	store  RunStore
-	sinks  []NamedEventSink
-	policy PersistencePolicy
-	now    func() time.Time
-	ctx    context.Context
-	cancel context.CancelFunc
-	events chan Event
-	done   chan struct{}
-	seq    atomic.Int64
+	inner      Run
+	store      RunStore
+	sinks      []NamedEventSink
+	policy     PersistencePolicy
+	now        func() time.Time
+	ctx        context.Context
+	cancel     context.CancelFunc
+	events     chan Event
+	done       chan struct{}
+	seq        atomic.Int64
+	lastUpsert time.Time
 
 	mu      sync.Mutex
 	record  RunRecord
@@ -256,7 +259,15 @@ func (r *observedRun) forward() {
 			return
 		case r.events <- event:
 		default:
-			r.recordDroppedEvent()
+			if event.Kind() != EventMessage && event.Kind() != EventProgress {
+				select {
+				case <-r.ctx.Done():
+					return
+				case r.events <- event:
+				}
+			} else {
+				r.recordDroppedEvent()
+			}
 		}
 	}
 }
@@ -282,11 +293,11 @@ func (r *observedRun) eventRecord(event Event) RunEventRecord {
 		record.RawSafe = event.Raw.Safe
 		record.RawSource = event.Raw.Source
 		record.RawEncoding = event.Raw.Encoding
-		if event.Raw.Safe || r.policy.PersistUnsafeRawPayloads {
-			record.RawData = append([]byte(nil), event.Raw.Data...)
+		if (event.Raw.Safe && !r.policy.OmitSafeRawPayloads) || (!event.Raw.Safe && r.policy.PersistUnsafeRawPayloads) {
+			record.RawData = event.Raw.Data
 		} else {
 			record.RawOmitted = true
-			record.RawOmissionReason = "unsafe raw payload omitted by persistence policy"
+			record.RawOmissionReason = "raw payload omitted by persistence policy"
 		}
 	}
 	return record
@@ -309,7 +320,23 @@ func (r *observedRun) appendRecord(event RunEventRecord) {
 			r.recordFailure("store_append_event", "store", false, err)
 		}
 	}
-	r.upsert(r.ctx)
+	r.upsertIfDue(r.ctx)
+}
+
+func (r *observedRun) upsertIfDue(ctx context.Context) {
+	interval := r.policy.RunUpsertInterval
+	if interval <= 0 {
+		interval = 250 * time.Millisecond
+	}
+	r.mu.Lock()
+	now := r.now()
+	if !r.lastUpsert.IsZero() && now.Sub(r.lastUpsert) < interval {
+		r.mu.Unlock()
+		return
+	}
+	r.lastUpsert = now
+	r.mu.Unlock()
+	r.upsert(ctx)
 }
 
 func (r *observedRun) applyEventLocked(event RunEventRecord) {
@@ -415,18 +442,56 @@ func (r *observedRun) recordDroppedEvent() {
 
 // MemoryRunStore is a deterministic in-memory reference RunStore.
 type MemoryRunStore struct {
-	mu        sync.Mutex
-	active    map[RunID]RunRecord
-	completed map[RunID]RunRecord
-	events    map[RunID][]RunEventRecord
+	mu                sync.Mutex
+	active            map[RunID]RunRecord
+	completed         map[RunID]RunRecord
+	events            map[RunID][]RunEventRecord
+	limits            MemoryRunStoreLimits
+	completedOrder    []RunID
+	completedStoredAt map[RunID]time.Time
+	rawBytes          map[RunID]int64
+}
+
+// MemoryRunStoreLimits bounds retained observability data. Zero uses the
+// defaults; a negative value disables that limit.
+type MemoryRunStoreLimits struct {
+	MaxEventsPerRun   int
+	MaxRawBytesPerRun int64
+	MaxCompletedRuns  int
+	CompletedRunTTL   time.Duration
+}
+
+var defaultMemoryRunStoreLimits = MemoryRunStoreLimits{
+	MaxEventsPerRun: 2048, MaxRawBytesPerRun: 16 * 1024 * 1024,
+	MaxCompletedRuns: 128, CompletedRunTTL: 24 * time.Hour,
 }
 
 // NewMemoryRunStore constructs an empty in-memory store.
 func NewMemoryRunStore() *MemoryRunStore {
+	return NewMemoryRunStoreWithLimits(defaultMemoryRunStoreLimits)
+}
+
+// NewMemoryRunStoreWithLimits constructs a bounded in-memory store.
+func NewMemoryRunStoreWithLimits(limits MemoryRunStoreLimits) *MemoryRunStore {
+	if limits.MaxEventsPerRun == 0 {
+		limits.MaxEventsPerRun = defaultMemoryRunStoreLimits.MaxEventsPerRun
+	}
+	if limits.MaxCompletedRuns == 0 {
+		limits.MaxCompletedRuns = defaultMemoryRunStoreLimits.MaxCompletedRuns
+	}
+	if limits.MaxRawBytesPerRun == 0 {
+		limits.MaxRawBytesPerRun = defaultMemoryRunStoreLimits.MaxRawBytesPerRun
+	}
+	if limits.CompletedRunTTL == 0 {
+		limits.CompletedRunTTL = defaultMemoryRunStoreLimits.CompletedRunTTL
+	}
 	return &MemoryRunStore{
-		active:    map[RunID]RunRecord{},
-		completed: map[RunID]RunRecord{},
-		events:    map[RunID][]RunEventRecord{},
+		active:            map[RunID]RunRecord{},
+		completed:         map[RunID]RunRecord{},
+		events:            map[RunID][]RunEventRecord{},
+		limits:            limits,
+		completedStoredAt: map[RunID]time.Time{},
+		rawBytes:          map[RunID]int64{},
 	}
 }
 
@@ -437,7 +502,12 @@ func (s *MemoryRunStore) UpsertRun(_ context.Context, record RunRecord) error {
 	record = cloneRunRecord(record)
 	if record.Status.Terminal() {
 		delete(s.active, record.RunID)
+		if _, exists := s.completed[record.RunID]; !exists {
+			s.completedOrder = append(s.completedOrder, record.RunID)
+		}
+		s.completedStoredAt[record.RunID] = time.Now()
 		s.completed[record.RunID] = record
+		s.evictCompletedLocked()
 		return nil
 	}
 	s.active[record.RunID] = record
@@ -448,8 +518,48 @@ func (s *MemoryRunStore) AppendEvent(_ context.Context, event RunEventRecord) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.initLocked()
-	s.events[event.RunID] = append(s.events[event.RunID], cloneEventRecord(event))
+	stored := cloneEventRecord(event)
+	s.events[event.RunID] = append(s.events[event.RunID], stored)
+	s.rawBytes[event.RunID] += int64(len(stored.RawData))
+	for s.eventLimitExceededLocked(event.RunID) && len(s.events[event.RunID]) > 0 {
+		dropped := s.events[event.RunID][0]
+		s.events[event.RunID][0] = RunEventRecord{}
+		s.events[event.RunID] = s.events[event.RunID][1:]
+		s.rawBytes[event.RunID] -= int64(len(dropped.RawData))
+	}
 	return nil
+}
+
+func (s *MemoryRunStore) eventLimitExceededLocked(id RunID) bool {
+	eventLimit := s.limits.MaxEventsPerRun
+	byteLimit := s.limits.MaxRawBytesPerRun
+	return (eventLimit >= 0 && len(s.events[id]) > eventLimit) || (byteLimit >= 0 && s.rawBytes[id] > byteLimit)
+}
+
+func (s *MemoryRunStore) evictCompletedLocked() {
+	if ttl := s.limits.CompletedRunTTL; ttl > 0 {
+		cutoff := time.Now().Add(-ttl)
+		for len(s.completedOrder) > 0 && s.completedStoredAt[s.completedOrder[0]].Before(cutoff) {
+			s.evictCompletedRunLocked(s.completedOrder[0])
+			s.completedOrder = s.completedOrder[1:]
+		}
+	}
+	limit := s.limits.MaxCompletedRuns
+	if limit < 0 {
+		return
+	}
+	for len(s.completedOrder) > limit {
+		id := s.completedOrder[0]
+		s.completedOrder = s.completedOrder[1:]
+		s.evictCompletedRunLocked(id)
+	}
+}
+
+func (s *MemoryRunStore) evictCompletedRunLocked(id RunID) {
+	delete(s.completed, id)
+	delete(s.events, id)
+	delete(s.completedStoredAt, id)
+	delete(s.rawBytes, id)
 }
 
 func (s *MemoryRunStore) ListActiveRuns(_ context.Context) ([]RunRecord, error) {
@@ -467,6 +577,7 @@ func (s *MemoryRunStore) GetCompletedRun(_ context.Context, id RunID) (RunRecord
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.initLocked()
+	s.evictCompletedLocked()
 	record, ok := s.completed[id]
 	return cloneRunRecord(record), ok, nil
 }
@@ -475,6 +586,7 @@ func (s *MemoryRunStore) ListRunEvents(_ context.Context, id RunID) ([]RunEventR
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.initLocked()
+	s.evictCompletedLocked()
 	events := s.events[id]
 	out := make([]RunEventRecord, len(events))
 	for i := range events {
@@ -492,6 +604,12 @@ func (s *MemoryRunStore) initLocked() {
 	}
 	if s.events == nil {
 		s.events = map[RunID][]RunEventRecord{}
+	}
+	if s.completedStoredAt == nil {
+		s.completedStoredAt = map[RunID]time.Time{}
+	}
+	if s.rawBytes == nil {
+		s.rawBytes = map[RunID]int64{}
 	}
 }
 
