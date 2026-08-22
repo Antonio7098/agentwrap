@@ -191,6 +191,16 @@ func (r ValidatingRuntime) Capabilities(ctx context.Context) (Capabilities, erro
 	return caps, nil
 }
 
+// ListModels forwards model enumeration to the wrapped runtime when it
+// supports the optional ModelLister capability.
+func (r ValidatingRuntime) ListModels(ctx context.Context, req ModelsRequest) ([]ModelInfo, error) {
+	lister, ok := listerFor(r.Runtime)
+	if !ok {
+		return nil, nil
+	}
+	return lister.ListModels(ctx, req)
+}
+
 type validationRun struct {
 	id       RunID
 	runtime  Runtime

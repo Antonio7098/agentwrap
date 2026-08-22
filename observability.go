@@ -184,6 +184,28 @@ func (r ObservingRuntime) Capabilities(ctx context.Context) (Capabilities, error
 	return r.Runtime.Capabilities(ctx)
 }
 
+// ListModels forwards model enumeration to the wrapped runtime when it
+// supports the optional ModelLister capability.
+func (r ObservingRuntime) ListModels(ctx context.Context, req ModelsRequest) ([]ModelInfo, error) {
+	lister, ok := listerFor(r.Runtime)
+	if !ok {
+		return nil, nil
+	}
+	return lister.ListModels(ctx, req)
+}
+
+// listerFor type-asserts an optional ModelLister capability on a wrapped
+// runtime. It returns ok=false when the runtime is missing or lacks support so
+// wrappers stay silent rather than failing callers that merely probed for the
+// capability.
+func listerFor(runtime Runtime) (ModelLister, bool) {
+	if runtime == nil {
+		return nil, false
+	}
+	lister, ok := runtime.(ModelLister)
+	return lister, ok
+}
+
 // ListActiveRuns implements RunInspector when a store is configured.
 func (r ObservingRuntime) ListActiveRuns(ctx context.Context) ([]RunRecord, error) {
 	if r.Store == nil {

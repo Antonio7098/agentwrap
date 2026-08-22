@@ -19,6 +19,28 @@ type Run interface {
 	Cancel(context.Context) error
 }
 
+// ModelsRequest scopes a model enumeration request.
+type ModelsRequest struct {
+	// Provider optionally filters models to one provider.
+	Provider ProviderID
+	// WorkDir is the optional working directory for the listing command.
+	WorkDir string
+}
+
+// ModelInfo describes one model available to the runtime.
+type ModelInfo struct {
+	Provider ProviderID
+	ID       ModelID
+	Name     string
+}
+
+// ModelLister is an optional runtime capability for enumerating available
+// models. Callers should type-assert for it; middleware wrappers that embed a
+// ModelLister forward the request.
+type ModelLister interface {
+	ListModels(context.Context, ModelsRequest) ([]ModelInfo, error)
+}
+
 // RunRequest contains the minimal caller input needed by the runtime contract.
 type RunRequest struct {
 	Prompt           string

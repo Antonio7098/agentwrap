@@ -329,6 +329,17 @@ func (r PolicyRunner) Capabilities(ctx context.Context) (Capabilities, error) {
 	return r.Runtime.Capabilities(ctx)
 }
 
+// ListModels forwards model enumeration to the primary runtime when it
+// supports the optional ModelLister capability. Listing never runs agent work
+// and is not subject to resilience policy.
+func (r PolicyRunner) ListModels(ctx context.Context, req ModelsRequest) ([]ModelInfo, error) {
+	lister, ok := listerFor(r.Runtime)
+	if !ok {
+		return nil, nil
+	}
+	return lister.ListModels(ctx, req)
+}
+
 type policyRun struct {
 	id       RunID
 	original RunRequest
