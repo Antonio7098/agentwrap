@@ -6,6 +6,26 @@ This changelog is intentionally detailed. The changes here were driven by real s
 
 ## Unreleased
 
+### Usage can now be priced locally against a model rate table
+
+We added best-effort API-equivalent cost estimation so callers get a cost even when the runtime does not report one.
+
+What changed:
+
+- New root-package pricing surface: `RateTable`, `ParseRateTable`, `NormalizeModelName`, `PriceUsage`, and `CacheSavings`.
+- The rate catalog is LiteLLM's public `model_prices_and_context_window.json` (the same table ccusage prices against). Entries missing input or output rates are dropped; missing cache rates fall back to the plain input rate.
+- `RateTableStore` resolves rates with an in-memory, on-disk snapshot (`usage-model-rates.json`), and network layers under a 24 hour TTL. A stale snapshot is preferred over failure, and total unavailability degrades to unpriced instead of erroring runs.
+- `RunMetadata` and `RunRecord` gained a `CostSource` (`provider_reported`, `model_priced`, `unpriced`) so cost provenance travels with every result.
+- The OpenCode adapter accepts `WithRateTableStore`. Provider-reported cost still wins; when absent, final usage is priced at public API rates and surfaced as an estimate. Reasoning tokens are never billed separately because they are already inside output tokens.
+
+Why this matters:
+
+OpenCode only reports cost for providers whose message rows carry one. Without local pricing, token-heavy runs on other models had no cost signal at all, and callers could not tell reported numbers from estimates.
+
+Deferred follow-up:
+
+- Pricing uses the primary request model from run context. Per-attempt fallback-model pricing (when a backup target serves the traffic) is not yet attributed separately.
+
 ### Final result precedence and subprocess cleanup were hardened
 
 We tightened the OpenCode subprocess adapter around the two process-boundary cases that mattered most in smoke testing.

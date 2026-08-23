@@ -49,6 +49,17 @@ func WithStderrLimit(limit int) Option {
 	}
 }
 
+// WithRateTableStore enables local cost estimation. When OpenCode does not
+// report a cost, token totals are priced against the store's model rate table
+// (LiteLLM catalog, cached on disk) and surfaced as an estimate.
+func WithRateTableStore(store *agentwrap.RateTableStore) Option {
+	return func(r *Runtime) {
+		if store != nil {
+			r.rates = store
+		}
+	}
+}
+
 func withProcessRunner(runner processRunner) Option {
 	return func(r *Runtime) {
 		if runner != nil {
@@ -84,6 +95,7 @@ type Runtime struct {
 	dbQuery     func(context.Context, agentwrap.SessionID, time.Time) (string, error)
 	dbQuerySet  bool
 	now         clock
+	rates       *agentwrap.RateTableStore
 }
 
 var _ agentwrap.Runtime = (*Runtime)(nil)

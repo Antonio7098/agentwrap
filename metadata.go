@@ -34,6 +34,7 @@ type RunMetadata struct {
 	Errors         []SDKError
 	Usage          Usage
 	EstimatedCost  *CostEstimate
+	CostSource     CostSource
 	ThroughputTPS  *float64
 	NativeMetadata map[string]any
 }

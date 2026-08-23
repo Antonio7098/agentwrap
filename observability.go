@@ -46,6 +46,7 @@ type RunRecord struct {
 	Errors                 []SDKError
 	Usage                  Usage
 	EstimatedCost          *CostEstimate
+	CostSource             CostSource
 	ThroughputTPS          *float64
 	NativeMetadata         map[string]any
 }
@@ -428,6 +429,7 @@ func (r *observedRun) mergeResultLocked(result RunResult) {
 	}
 	r.record.Usage = firstUsage(metadata.Usage, result.Usage, r.record.Usage)
 	r.record.EstimatedCost = metadata.EstimatedCost
+	r.record.CostSource = metadata.CostSource
 	r.record.ThroughputTPS = metadata.ThroughputTPS
 	r.record.NativeMetadata = cloneAnyMap(metadata.NativeMetadata)
 }

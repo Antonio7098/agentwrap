@@ -67,6 +67,7 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 		stderrBuffer: newLimitBuffer(r.stderrLimit),
 		stderrDone:   make(chan struct{}),
 		dbQuery:      r.dbQuery,
+		rates:        r.rates,
 		lifecycle:    agentwrap.StatusStarting,
 	}
 	handle.emitPermissionAudit("policy_initialized")
@@ -221,6 +222,7 @@ type run struct {
 	stderrBuffer       *limitBuffer
 	stderrDone         chan struct{}
 	dbQuery            func(context.Context, agentwrap.SessionID, time.Time) (string, error)
+	rates              *agentwrap.RateTableStore
 	now                clock
 	logOffsets         map[string]int64
 }
@@ -479,7 +481,14 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 			"native_extension_count": r.categories[string(agentwrap.EventNativeExtension)],
 		},
 	}
-	metadata.EstimatedCost = proof.cost
+	if proof.cost != nil {
+		// OpenCode's own per-message cost accounting is authoritative.
+		metadata.EstimatedCost = proof.cost
+		metadata.CostSource = agentwrap.CostSourceProviderReported
+	} else if cost, source := r.priceFinalUsage(); source != "" {
+		metadata.EstimatedCost = cost
+		metadata.CostSource = source
+	}
 	if r.postFinalDecodeErr != "" {
 		metadata.NativeMetadata["post_final_decode_warning"] = r.postFinalDecodeErr
 	}
@@ -577,6 +586,33 @@ type dbReconcileProof struct {
 	warning        string
 	err            *agentwrap.SDKError
 	cost           *agentwrap.CostEstimate
+}
+
+// priceFinalUsage estimates cost at public API rates when the runtime did not
+// report one. The returned source is empty when there was no token usage to
+// price.
+func (r *run) priceFinalUsage() (*agentwrap.CostEstimate, agentwrap.CostSource) {
+	if r.rates == nil || !usageHasTokens(r.usage) {
+		return nil, ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), agentwrap.RatesFetchTimeout)
+	defer cancel()
+	table, _, err := r.rates.Ensure(ctx)
+	if err != nil {
+		return nil, agentwrap.CostSourceUnpriced
+	}
+	priced := agentwrap.PriceUsage(table, string(r.context.Model), r.usage)
+	switch priced.Source {
+	case agentwrap.CostSourceModelPriced:
+		return &agentwrap.CostEstimate{Amount: priced.Amount, Currency: priced.Currency, Estimate: true}, agentwrap.CostSourceModelPriced
+	default:
+		return nil, agentwrap.CostSourceUnpriced
+	}
+}
+
+func usageHasTokens(usage agentwrap.Usage) bool {
+	return usage.InputTokens != nil || usage.OutputTokens != nil || usage.TotalTokens != nil ||
+		usage.CacheReadTokens != nil || usage.CacheWriteTokens != nil
 }
 
 func (r *run) reconcileFinalState() dbReconcileProof {
