@@ -20,6 +20,13 @@ type Event struct {
 
 ## Event Kinds
 
+Tool events may carry the provider-neutral fields `tool_call_id`, `tool_name`,
+`tool_status`, `tool_arguments`, `tool_result`, and `tool_error`. Structured
+arguments and results keep their JSON shape. Agentwrap recursively redacts
+credential-shaped keys and common secret values before adding these fields;
+the adapter's native payload remains available under the existing raw-payload
+policy.
+
 Current canonical projections are:
 
 - `lifecycle`
@@ -116,4 +123,3 @@ Unknown values remain `nil`. Code should not treat unknown usage as zero.
 - `Error`
 
 Cleanup is separate from the primary run result. A completed run can still include cleanup diagnostics.
-

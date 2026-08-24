@@ -62,6 +62,9 @@ func projectNative(in projectionInput) projectionResult {
 	if finishReason != "" {
 		payload["finish_reason"] = finishReason
 	}
+	if category == agentwrap.EventTool {
+		payload = agentwrap.EventPayloadWithToolObservation(payload, toolObservationFrom(record.Data))
+	}
 	event := agentwrap.Event{
 		ID:        agentwrap.EventID(fmt.Sprintf("%s:%d", in.runID, in.seq)),
 		RunID:     in.runID,
@@ -105,6 +108,57 @@ func projectNative(in projectionInput) projectionResult {
 		}
 	}
 	return result
+}
+
+func toolObservationFrom(data map[string]any) agentwrap.ToolObservation {
+	status := firstNestedString(data, "tool_status", "status", "phase")
+	if status == "" {
+		status = firstNestedString(data, "state")
+	}
+	return agentwrap.ToolObservation{
+		CallID:    firstNestedString(data, "call_id", "callID", "tool_call_id", "toolCallId", "id"),
+		Name:      firstNestedString(data, "tool", "name", "tool_name", "toolName"),
+		Status:    status,
+		Arguments: firstNestedValue(data, "arguments", "args", "input", "parameters"),
+		Result:    firstNestedValue(data, "result", "output", "content"),
+		Error:     firstNestedValue(data, "error"),
+	}
+}
+
+func firstNestedString(value any, keys ...string) string {
+	found := firstNestedValue(value, keys...)
+	text, _ := found.(string)
+	return strings.TrimSpace(text)
+}
+
+func firstNestedValue(value any, keys ...string) any {
+	return nestedValue(value, keys, 0)
+}
+
+func nestedValue(value any, keys []string, depth int) any {
+	if depth > 5 {
+		return nil
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range keys {
+			if found, ok := typed[key]; ok && found != nil {
+				return found
+			}
+		}
+		for _, nested := range typed {
+			if found := nestedValue(nested, keys, depth+1); found != nil {
+				return found
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if found := nestedValue(nested, keys, depth+1); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
 }
 
 func finishReasonFrom(data map[string]any) string {
