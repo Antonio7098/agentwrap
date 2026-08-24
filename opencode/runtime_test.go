@@ -14,7 +14,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/Antonio7098/agentwrap"
 )
@@ -107,9 +106,12 @@ func TestStartRunBuildsStructuredCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = drainRun(t, run)
-	want := []string{"run", "--format", "json", "--dir", "/tmp/work", "--model", "anthropic/claude", "--pure", "hello"}
+	want := []string{"run", "--format", "json", "--dir", "/tmp/work", "--model", "anthropic/claude", "--pure"}
 	if !equalStrings(runner.spec.Args, want) {
 		t.Fatalf("args = %#v, want %#v", runner.spec.Args, want)
+	}
+	if runner.spec.Stdin != "hello" {
+		t.Fatalf("stdin = %q, want prompt", runner.spec.Stdin)
 	}
 	if runner.spec.WorkDir != "/tmp/work" || runner.spec.Executable != "/bin/opencode" {
 		t.Fatalf("bad spec: %#v", runner.spec)
@@ -128,38 +130,29 @@ func TestStartRunPreservesProviderForNestedModelID(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = drainRun(t, run)
-	want := []string{"run", "--format", "json", "--model", "openrouter/stealth/ox-alpha", "hello"}
+	want := []string{"run", "--format", "json", "--model", "openrouter/stealth/ox-alpha"}
 	if !equalStrings(runner.spec.Args, want) {
 		t.Fatalf("args = %#v, want %#v", runner.spec.Args, want)
 	}
 }
 
-func TestStartRunChunksLargePromptAtRuneBoundaries(t *testing.T) {
+func TestStartRunPassesLargeOptionLikePromptThroughStdin(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
 	rt := NewRuntime(withProcessRunner(runner))
-	prompt := string(bytes.Repeat([]byte("a"), maxArgLen-1)) + "€" + string(bytes.Repeat([]byte("b"), maxArgLen))
+	prompt := string(bytes.Repeat([]byte("a"), 100*1024)) + "-structure.md\n" + string(bytes.Repeat([]byte("b"), 100*1024))
 	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: prompt})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = drainRun(t, run)
 
-	chunks := runner.spec.Args[3:]
-	if len(chunks) < 2 {
-		t.Fatalf("prompt chunks = %d, want at least 2", len(chunks))
+	if got := runner.spec.Stdin; got != prompt {
+		t.Fatalf("stdin prompt length = %d, want %d", len(got), len(prompt))
 	}
-	var rebuilt bytes.Buffer
-	for i, chunk := range chunks {
-		if len(chunk) > maxArgLen {
-			t.Fatalf("chunk %d length = %d, want <= %d", i, len(chunk), maxArgLen)
+	for _, arg := range runner.spec.Args {
+		if strings.Contains(arg, "-structure.md") {
+			t.Fatalf("prompt leaked into argv: %q", arg)
 		}
-		if !utf8.ValidString(chunk) {
-			t.Fatalf("chunk %d is not valid UTF-8", i)
-		}
-		rebuilt.WriteString(chunk)
-	}
-	if got := rebuilt.String(); got != prompt {
-		t.Fatalf("rebuilt prompt length = %d, want %d", len(got), len(prompt))
 	}
 }
 

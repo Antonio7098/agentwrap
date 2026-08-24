@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,6 +22,7 @@ func (execProcessRunner) Start(ctx context.Context, spec processSpec) (process, 
 	if len(spec.Env) > 0 {
 		cmd.Env = append(os.Environ(), spec.Env...)
 	}
+	cmd.Stdin = strings.NewReader(spec.Stdin)
 	configureProcessGroup(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

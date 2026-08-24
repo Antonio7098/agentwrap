@@ -172,6 +172,7 @@ type processSpec struct {
 	Args       []string
 	Env        []string
 	WorkDir    string
+	Stdin      string
 }
 
 type processResult struct {

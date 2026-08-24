@@ -14,7 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/Antonio7098/agentwrap"
 )
@@ -125,36 +124,6 @@ func (r *Runtime) requiredPreflight(ctx context.Context, req agentwrap.RunReques
 	return nil
 }
 
-const maxArgLen = 100 * 1024
-
-// appendChunkedArgs splits a large string into chunks at rune boundaries,
-// each no larger than maxArgLen, and appends them to args. This works
-// around kernel MAX_ARG_STRLEN limits (commonly ~128 KB) when passing
-// long prompts as CLI arguments to "opencode run [message..]".
-func appendChunkedArgs(args []string, s string) []string {
-	if len(s) <= maxArgLen {
-		return append(args, s)
-	}
-	for len(s) > 0 {
-		end := maxArgLen
-		if end >= len(s) {
-			end = len(s)
-		} else {
-			// Back up to a rune boundary so we never split a
-			// multi-byte UTF-8 character across two chunks.
-			for end > 0 && !utf8.RuneStart(s[end]) {
-				end--
-			}
-			if end == 0 {
-				end = maxArgLen
-			}
-		}
-		args = append(args, s[:end])
-		s = s[end:]
-	}
-	return args
-}
-
 func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTranslation) (processSpec, error) {
 	args := []string{"run", "--format", "json"}
 	if req.WorkDir != "" {
@@ -173,7 +142,6 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTr
 		args = append(args, "--session", string(req.SessionID))
 	}
 	args = append(args, r.extraArgs...)
-	args = appendChunkedArgs(args, req.Prompt)
 	env, err := mergeEnv(r.env, permissions.config)
 	if err != nil {
 		return processSpec{}, err
@@ -195,6 +163,7 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTr
 		Args:       args,
 		Env:        env,
 		WorkDir:    req.WorkDir,
+		Stdin:      req.Prompt,
 	}, nil
 }
 
