@@ -178,6 +178,12 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTr
 	if err != nil {
 		return processSpec{}, err
 	}
+	if r.snapshots != nil {
+		env, err = withSnapshotConfig(env, *r.snapshots)
+		if err != nil {
+			return processSpec{}, err
+		}
+	}
 	if databasePath := strings.TrimSpace(req.Metadata[MetadataDatabasePath]); databasePath != "" {
 		if !filepath.IsAbs(databasePath) || filepath.Base(filepath.Clean(databasePath)) != "opencode.db" {
 			return processSpec{}, agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode database path", "OpenCode database path must be an absolute path ending in opencode.db", nil)
@@ -190,6 +196,27 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTr
 		Env:        env,
 		WorkDir:    req.WorkDir,
 	}, nil
+}
+
+func withSnapshotConfig(env []string, enabled bool) ([]string, error) {
+	const prefix = "OPENCODE_CONFIG_CONTENT="
+	config := map[string]any{}
+	result := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			result = append(result, item)
+			continue
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(item, prefix)), &config); err != nil {
+			return nil, agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode snapshots", "existing OPENCODE_CONFIG_CONTENT is not valid JSON", err)
+		}
+	}
+	config["snapshot"] = enabled
+	content, err := json.Marshal(config)
+	if err != nil {
+		return nil, agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode snapshots", "OpenCode snapshot config could not be encoded", err)
+	}
+	return append(result, prefix+string(content)), nil
 }
 
 func setEnvValue(env []string, key, value string) []string {

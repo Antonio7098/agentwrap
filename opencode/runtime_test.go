@@ -186,6 +186,34 @@ func TestStartRunUsesRequestScopedDatabase(t *testing.T) {
 	}
 }
 
+func TestStartRunCanDisableSnapshotsWithoutReplacingExistingConfig(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(
+		withProcessRunner(runner),
+		WithEnv(`OPENCODE_CONFIG_CONTENT={"provider":{"example":true}}`),
+		WithSnapshots(false),
+	)
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = drainRun(t, run)
+	for _, value := range runner.spec.Env {
+		if !strings.HasPrefix(value, "OPENCODE_CONFIG_CONTENT=") {
+			continue
+		}
+		var config map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(value, "OPENCODE_CONFIG_CONTENT=")), &config); err != nil {
+			t.Fatal(err)
+		}
+		if config["snapshot"] != false || config["provider"] == nil {
+			t.Fatalf("config = %#v", config)
+		}
+		return
+	}
+	t.Fatal("OPENCODE_CONFIG_CONTENT was not set")
+}
+
 func TestStartRunRejectsUnsafeRequestScopedDatabase(t *testing.T) {
 	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}))
 	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{

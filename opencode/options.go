@@ -40,6 +40,14 @@ func WithEnv(env ...string) Option {
 	}
 }
 
+// WithSnapshots controls OpenCode filesystem snapshots. Disabling them avoids
+// the shared Git object store that OpenCode otherwise builds for undo support.
+func WithSnapshots(enabled bool) Option {
+	return func(r *Runtime) {
+		r.snapshots = &enabled
+	}
+}
+
 // WithStderrLimit bounds retained stderr diagnostics in bytes.
 func WithStderrLimit(limit int) Option {
 	return func(r *Runtime) {
@@ -96,6 +104,7 @@ type Runtime struct {
 	dbQuerySet  bool
 	now         clock
 	rates       *agentwrap.RateTableStore
+	snapshots   *bool
 }
 
 var _ agentwrap.Runtime = (*Runtime)(nil)
