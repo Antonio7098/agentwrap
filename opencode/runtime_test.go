@@ -163,6 +163,44 @@ func TestStartRunChunksLargePromptAtRuneBoundaries(t *testing.T) {
 	}
 }
 
+func TestStartRunUsesRequestScopedDatabase(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner), WithEnv("EXISTING=1", "OPENCODE_DB=/shared/opencode.db"))
+	databasePath := filepath.Join(t.TempDir(), "opencode.db")
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:   "hello",
+		Metadata: map[string]string{MetadataDatabasePath: databasePath},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = drainRun(t, run)
+	var databaseValues []string
+	for _, value := range runner.spec.Env {
+		if strings.HasPrefix(value, "OPENCODE_DB=") {
+			databaseValues = append(databaseValues, value)
+		}
+	}
+	if len(databaseValues) != 1 || databaseValues[0] != "OPENCODE_DB="+databasePath {
+		t.Fatalf("OPENCODE_DB values = %#v", databaseValues)
+	}
+}
+
+func TestStartRunRejectsUnsafeRequestScopedDatabase(t *testing.T) {
+	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}))
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:   "hello",
+		Metadata: map[string]string{MetadataDatabasePath: "relative/opencode.db"},
+	})
+	if err == nil {
+		t.Fatal("expected unsafe database path to fail")
+	}
+	var sdkErr *agentwrap.SDKError
+	if !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("error = %T %v", err, err)
+	}
+}
+
 func TestStartRunInjectsPermissionConfigContent(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
 	rt := NewRuntime(

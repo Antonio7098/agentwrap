@@ -21,6 +21,11 @@ import (
 
 var runCounter atomic.Int64
 
+// MetadataDatabasePath selects an isolated OpenCode SQLite database for one
+// logical request. The path must be absolute. Authentication and user config
+// remain shared because only OPENCODE_DB is overridden.
+const MetadataDatabasePath = "opencode.database_path"
+
 // StartRun launches OpenCode in JSON event mode and returns a streaming run
 // handle. The returned run owns the subprocess and event decoding state.
 func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agentwrap.Run, error) {
@@ -173,12 +178,29 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTr
 	if err != nil {
 		return processSpec{}, err
 	}
+	if databasePath := strings.TrimSpace(req.Metadata[MetadataDatabasePath]); databasePath != "" {
+		if !filepath.IsAbs(databasePath) || filepath.Base(filepath.Clean(databasePath)) != "opencode.db" {
+			return processSpec{}, agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode database path", "OpenCode database path must be an absolute path ending in opencode.db", nil)
+		}
+		env = setEnvValue(env, "OPENCODE_DB", filepath.Clean(databasePath))
+	}
 	return processSpec{
 		Executable: r.executable,
 		Args:       args,
 		Env:        env,
 		WorkDir:    req.WorkDir,
 	}, nil
+}
+
+func setEnvValue(env []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			result = append(result, item)
+		}
+	}
+	return append(result, prefix+value)
 }
 
 type run struct {
