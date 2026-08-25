@@ -577,6 +577,8 @@ func terminalOutputValue(value any, depth int) string {
 		return ""
 	}
 	switch typed := value.(type) {
+	case agentwrap.EventPayload:
+		return terminalOutputValue(map[string]any(typed), depth)
 	case map[string]any:
 		for _, key := range []string{"structured_output", "output", "content", "text", "message", "part"} {
 			if nested, ok := typed[key]; ok {

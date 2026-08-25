@@ -479,6 +479,15 @@ func TestAppendTerminalOutputHandlesDeltasAndCumulativeUpdates(t *testing.T) {
 	}
 }
 
+func TestTerminalOutputValueHandlesEventPayload(t *testing.T) {
+	payload := agentwrap.EventPayload{
+		"part": map[string]any{"type": "text", "text": "done"},
+	}
+	if got := terminalOutputValue(payload, 0); got != "done" {
+		t.Fatalf("terminal output = %q, want done", got)
+	}
+}
+
 func TestRunUnknownEventDoesNotFail(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "unknown.ndjson")}}
 	rt := NewRuntime(withProcessRunner(runner))
