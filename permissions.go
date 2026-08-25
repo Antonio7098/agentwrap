@@ -24,7 +24,10 @@ type PermissionTool string
 const (
 	PermissionToolRead              PermissionTool = "read"
 	PermissionToolEdit              PermissionTool = "edit"
+	PermissionToolWrite             PermissionTool = "write"
+	PermissionToolPatch             PermissionTool = "patch"
 	PermissionToolShell             PermissionTool = "shell"
+	PermissionToolBash              PermissionTool = "bash"
 	PermissionToolGlob              PermissionTool = "glob"
 	PermissionToolSearch            PermissionTool = "search"
 	PermissionToolList              PermissionTool = "list"

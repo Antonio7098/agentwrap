@@ -13,7 +13,10 @@ const opencodeConfigContentEnv = "OPENCODE_CONFIG_CONTENT="
 var opencodePermissionTools = map[agentwrap.PermissionTool]string{
 	agentwrap.PermissionToolRead:              "read",
 	agentwrap.PermissionToolEdit:              "edit",
+	agentwrap.PermissionToolWrite:             "edit",
+	agentwrap.PermissionToolPatch:             "edit",
 	agentwrap.PermissionToolShell:             "bash",
+	agentwrap.PermissionToolBash:              "bash",
 	agentwrap.PermissionToolGlob:              "glob",
 	agentwrap.PermissionToolSearch:            "grep",
 	agentwrap.PermissionToolList:              "list",
@@ -56,6 +59,7 @@ func translatePermissions(req agentwrap.RunRequest) (permissionTranslation, erro
 			Reason:      "expanded to OpenCode native tool permissions",
 		})
 	}
+	explicit := map[string]agentwrap.PermissionAction{}
 	for tool, action := range req.PermissionPolicy.Tools {
 		nativeTool, ok := opencodePermissionTools[tool]
 		if !ok {
@@ -70,6 +74,16 @@ func translatePermissions(req agentwrap.RunRequest) (permissionTranslation, erro
 		if action == agentwrap.PermissionActionDefault {
 			continue
 		}
+		if previous, exists := explicit[nativeTool]; exists && previous != action {
+			return permissionTranslation{}, agentwrap.NewError(
+				agentwrap.ErrorConfiguration,
+				"opencode permissions",
+				fmt.Sprintf("permission aliases for OpenCode tool %q have conflicting actions", nativeTool),
+				nil,
+				agentwrap.WithDebugDetail(string(tool)),
+			)
+		}
+		explicit[nativeTool] = action
 		permissionConfig[nativeTool] = string(action)
 		metadata.Support = append(metadata.Support, agentwrap.PermissionFeatureSupport{
 			Feature:     string(tool),

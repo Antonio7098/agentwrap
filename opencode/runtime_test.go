@@ -300,6 +300,64 @@ func TestStartRunInjectsPermissionConfigContent(t *testing.T) {
 	}
 }
 
+func TestStartRunMapsFilesystemAndShellPermissionAliases(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:      "hello",
+		Permissions: "restricted",
+		PermissionPolicy: &agentwrap.PermissionPolicy{
+			Default: agentwrap.PermissionActionDeny,
+			Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
+				agentwrap.PermissionToolRead:  agentwrap.PermissionActionAllow,
+				agentwrap.PermissionToolEdit:  agentwrap.PermissionActionDeny,
+				agentwrap.PermissionToolWrite: agentwrap.PermissionActionDeny,
+				agentwrap.PermissionToolPatch: agentwrap.PermissionActionDeny,
+				agentwrap.PermissionToolShell: agentwrap.PermissionActionDeny,
+				agentwrap.PermissionToolBash:  agentwrap.PermissionActionDeny,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if len(result.Metadata.Permissions.Unsupported) != 0 {
+		t.Fatalf("unsupported metadata = %#v", result.Metadata.Permissions.Unsupported)
+	}
+	var content map[string]any
+	for _, value := range runner.spec.Env {
+		if strings.HasPrefix(value, opencodeConfigContentEnv) {
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(value, opencodeConfigContentEnv)), &content); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	permission := content["permission"].(map[string]any)
+	if permission["read"] != "allow" || permission["edit"] != "deny" || permission["bash"] != "deny" {
+		t.Fatalf("permission config = %#v", permission)
+	}
+}
+
+func TestStartRunRejectsConflictingPermissionAliases(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: "hello",
+		PermissionPolicy: &agentwrap.PermissionPolicy{Tools: map[agentwrap.PermissionTool]agentwrap.PermissionAction{
+			agentwrap.PermissionToolEdit:  agentwrap.PermissionActionAllow,
+			agentwrap.PermissionToolWrite: agentwrap.PermissionActionDeny,
+		}},
+	})
+	var sdkErr *agentwrap.SDKError
+	if err == nil || !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("err = %#v, want configuration SDKError", err)
+	}
+	if runner.starts != 0 {
+		t.Fatalf("process starts = %d, want 0", runner.starts)
+	}
+}
+
 func TestStartRunRejectsInvalidExistingConfigContent(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
 	rt := NewRuntime(
