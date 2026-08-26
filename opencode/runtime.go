@@ -25,6 +25,12 @@ var runCounter atomic.Int64
 // remain shared because only OPENCODE_DB is overridden.
 const MetadataDatabasePath = "opencode.database_path"
 
+// MetadataTempRoot selects a caller-owned directory beneath which agentwrap
+// creates one disposable temporary directory for each OpenCode process. The
+// process receives that directory through TMPDIR, TMP, and TEMP. Agentwrap
+// removes it only after the process and stderr collector have exited.
+const MetadataTempRoot = "opencode.temp_root"
+
 // StartRun launches OpenCode in JSON event mode and returns a streaming run
 // handle. The returned run owns the subprocess and event decoding state.
 func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agentwrap.Run, error) {
@@ -75,13 +81,15 @@ func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agent
 		lifecycle:    agentwrap.StatusStarting,
 	}
 	handle.emitPermissionAudit("policy_initialized")
-	spec, err := r.processSpec(req, permissions)
+	spec, tempDir, err := r.processSpec(req, permissions)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
+	handle.tempDir = tempDir
 	proc, err := r.runner.Start(runCtx, spec)
 	if err != nil {
+		_ = removeProcessTempDir(tempDir)
 		cancel()
 		return nil, classifyStartError(err)
 	}
@@ -124,7 +132,7 @@ func (r *Runtime) requiredPreflight(ctx context.Context, req agentwrap.RunReques
 	return nil
 }
 
-func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTranslation) (processSpec, error) {
+func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTranslation) (processSpec, string, error) {
 	args := []string{"run", "--format", "json"}
 	if req.WorkDir != "" {
 		args = append(args, "--dir", req.WorkDir)
@@ -144,19 +152,28 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTr
 	args = append(args, r.extraArgs...)
 	env, err := mergeEnv(r.env, permissions.config)
 	if err != nil {
-		return processSpec{}, err
+		return processSpec{}, "", err
 	}
 	if r.snapshots != nil {
 		env, err = withSnapshotConfig(env, *r.snapshots)
 		if err != nil {
-			return processSpec{}, err
+			return processSpec{}, "", err
 		}
 	}
 	if databasePath := strings.TrimSpace(req.Metadata[MetadataDatabasePath]); databasePath != "" {
 		if !filepath.IsAbs(databasePath) || filepath.Base(filepath.Clean(databasePath)) != "opencode.db" {
-			return processSpec{}, agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode database path", "OpenCode database path must be an absolute path ending in opencode.db", nil)
+			return processSpec{}, "", agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode database path", "OpenCode database path must be an absolute path ending in opencode.db", nil)
 		}
 		env = setEnvValue(env, "OPENCODE_DB", filepath.Clean(databasePath))
+	}
+	tempDir, err := createProcessTempDir(req.Metadata[MetadataTempRoot])
+	if err != nil {
+		return processSpec{}, "", err
+	}
+	if tempDir != "" {
+		env = setEnvValue(env, "TMPDIR", tempDir)
+		env = setEnvValue(env, "TMP", tempDir)
+		env = setEnvValue(env, "TEMP", tempDir)
 	}
 	return processSpec{
 		Executable: r.executable,
@@ -164,7 +181,37 @@ func (r *Runtime) processSpec(req agentwrap.RunRequest, permissions permissionTr
 		Env:        env,
 		WorkDir:    req.WorkDir,
 		Stdin:      req.Prompt,
-	}, nil
+	}, tempDir, nil
+}
+
+func createProcessTempDir(root string) (string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return "", nil
+	}
+	root = filepath.Clean(root)
+	if !filepath.IsAbs(root) {
+		return "", agentwrap.NewError(agentwrap.ErrorConfiguration, "opencode temp root", "OpenCode temp root must be an absolute path", nil)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", agentwrap.NewError(agentwrap.ErrorRuntimeUnavailable, "opencode temp root", "OpenCode temp root could not be created", err)
+	}
+	dir, err := os.MkdirTemp(root, "attempt-")
+	if err != nil {
+		return "", agentwrap.NewError(agentwrap.ErrorRuntimeUnavailable, "opencode temp directory", "OpenCode process temp directory could not be created", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", agentwrap.NewError(agentwrap.ErrorRuntimeUnavailable, "opencode temp directory", "OpenCode process temp directory could not be secured", err)
+	}
+	return dir, nil
+}
+
+func removeProcessTempDir(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	return os.RemoveAll(dir)
 }
 
 func withSnapshotConfig(env []string, enabled bool) ([]string, error) {
@@ -239,6 +286,7 @@ type run struct {
 	terminalOutput     string
 	stderrBuffer       *limitBuffer
 	stderrDone         chan struct{}
+	tempDir            string
 	dbQuery            func(context.Context, agentwrap.SessionID, time.Time) (string, error)
 	rates              *agentwrap.RateTableStore
 	now                clock
@@ -374,6 +422,9 @@ func (r *run) run() {
 	}
 	processResult := r.proc.Wait()
 	<-r.stderrDone
+	if err := removeProcessTempDir(r.tempDir); err != nil {
+		r.warnings = append(r.warnings, "remove OpenCode process temp directory: "+err.Error())
+	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cleanupCancel()
 	cleanup := r.cleanup(cleanupCtx, "run_finished")

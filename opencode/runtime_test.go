@@ -179,6 +179,61 @@ func TestStartRunUsesRequestScopedDatabase(t *testing.T) {
 	}
 }
 
+func TestStartRunUsesAndRemovesRequestScopedTempDirectory(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner), WithEnv("TMPDIR=/shared/tmp", "TMP=/shared/tmp", "TEMP=/shared/tmp"))
+	tempRoot := t.TempDir()
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:   "hello",
+		Metadata: map[string]string{MetadataTempRoot: tempRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = drainRun(t, run)
+
+	values := map[string][]string{"TMPDIR": nil, "TMP": nil, "TEMP": nil}
+	for _, value := range runner.spec.Env {
+		for key := range values {
+			if strings.HasPrefix(value, key+"=") {
+				values[key] = append(values[key], strings.TrimPrefix(value, key+"="))
+			}
+		}
+	}
+	var processTemp string
+	for key, got := range values {
+		if len(got) != 1 {
+			t.Fatalf("%s values = %#v", key, got)
+		}
+		if processTemp == "" {
+			processTemp = got[0]
+		} else if got[0] != processTemp {
+			t.Fatalf("temporary directories differ: %q and %q", processTemp, got[0])
+		}
+	}
+	if filepath.Dir(processTemp) != tempRoot {
+		t.Fatalf("process temp directory = %q, root = %q", processTemp, tempRoot)
+	}
+	if _, err := os.Stat(processTemp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("process temp directory remains after exit: %v", err)
+	}
+}
+
+func TestStartRunRejectsRelativeRequestScopedTempRoot(t *testing.T) {
+	rt := NewRuntime(withProcessRunner(&fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}))
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt:   "hello",
+		Metadata: map[string]string{MetadataTempRoot: "relative/tmp"},
+	})
+	if err == nil {
+		t.Fatal("expected unsafe temp root to fail")
+	}
+	var sdkErr *agentwrap.SDKError
+	if !errors.As(err, &sdkErr) || sdkErr.Category != agentwrap.ErrorConfiguration {
+		t.Fatalf("error = %T %v", err, err)
+	}
+}
+
 func TestStartRunCanDisableSnapshotsWithoutReplacingExistingConfig(t *testing.T) {
 	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
 	rt := NewRuntime(
