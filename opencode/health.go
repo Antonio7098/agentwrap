@@ -40,6 +40,17 @@ func (r *Runtime) CheckHealth(ctx context.Context, req agentwrap.HealthCheckRequ
 			"env": agentwrap.RedactMetadata(map[string]any{"values": strings.Join(agentwrap.RedactEnv(r.env), "\n")})["values"],
 		},
 	}
+	probeRuntime := *r
+	tempDir, err := createProcessTempDir(req.Metadata[MetadataTempRoot])
+	if err != nil {
+		return report, err
+	}
+	defer func() { _ = removeProcessTempDir(tempDir) }()
+	if tempDir != "" {
+		probeRuntime.env = setEnvValue(probeRuntime.env, "TMPDIR", tempDir)
+		probeRuntime.env = setEnvValue(probeRuntime.env, "TMP", tempDir)
+		probeRuntime.env = setEnvValue(probeRuntime.env, "TEMP", tempDir)
+	}
 	if err := agentwrap.ValidateEffectiveConfig(report.EffectiveConfig); err != nil {
 		report.Results = append(report.Results, healthResult(r.now, agentwrap.HealthCheckConfig, agentwrap.HealthUnrecoverable, agentwrap.HealthSeverityError, err.UserDetail, err.DebugDetail, nil, err))
 		return agentwrap.AggregateHealth(report), nil
@@ -65,7 +76,7 @@ func (r *Runtime) CheckHealth(ctx context.Context, req agentwrap.HealthCheckRequ
 			return agentwrap.AggregateHealth(report), nil
 		default:
 		}
-		report.Results = append(report.Results, r.runHealthCheck(ctx, req, check))
+		report.Results = append(report.Results, probeRuntime.runHealthCheck(ctx, req, check))
 	}
 	return agentwrap.AggregateHealth(report), nil
 }
