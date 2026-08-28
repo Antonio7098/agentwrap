@@ -899,6 +899,30 @@ func dbHasTerminalAssistant(value any, usage *agentwrap.Usage) bool {
 			}
 		}
 	case map[string]any:
+		// OpenCode stores tokens in a nested object: data.tokens.{input,output,total,reasoning}
+		// plus data.tokens.cache.{read,write}. The flat field fallback covers older shapes.
+		if tokens, ok := v["tokens"].(map[string]any); ok {
+			if n, ok := int64From(tokens["input"]); ok && usage.InputTokens == nil {
+				usage.InputTokens = &n
+			}
+			if n, ok := int64From(tokens["output"]); ok && usage.OutputTokens == nil {
+				usage.OutputTokens = &n
+			}
+			if n, ok := int64From(tokens["total"]); ok && usage.TotalTokens == nil {
+				usage.TotalTokens = &n
+			}
+			if n, ok := int64From(tokens["reasoning"]); ok && usage.ReasoningTokens == nil {
+				usage.ReasoningTokens = &n
+			}
+			if cache, ok := tokens["cache"].(map[string]any); ok {
+				if n, ok := int64From(cache["read"]); ok && usage.CacheReadTokens == nil {
+					usage.CacheReadTokens = &n
+				}
+				if n, ok := int64From(cache["write"]); ok && usage.CacheWriteTokens == nil {
+					usage.CacheWriteTokens = &n
+				}
+			}
+		}
 		for _, key := range []string{"input_tokens", "inputTokens"} {
 			if n, ok := int64From(v[key]); ok && usage.InputTokens == nil {
 				usage.InputTokens = &n

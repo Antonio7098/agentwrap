@@ -88,6 +88,8 @@ func projectNative(in projectionInput) projectionResult {
 	}
 	if category == agentwrap.EventUsage {
 		result.usage = usageFrom(record.Data)
+	} else if candidate := usageFrom(record.Data); candidate.InputTokens != nil || candidate.OutputTokens != nil || candidate.TotalTokens != nil || candidate.CacheReadTokens != nil || candidate.CacheWriteTokens != nil || candidate.ReasoningTokens != nil {
+		result.usage = candidate
 	}
 	if category == agentwrap.EventArtifact {
 		result.artifacts = artifactsFrom(record.Data)
@@ -317,13 +319,48 @@ func messageFrom(data map[string]any) string {
 
 func usageFrom(data map[string]any) agentwrap.Usage {
 	usage := agentwrap.Usage{Native: data}
-	if n, ok := int64From(data["input_tokens"]); ok {
+	// OpenCode emits tokens in a nested object: data.tokens.{input,output,total,reasoning}
+	// plus data.tokens.cache.{read,write}. Durable DB message rows use
+	// data.tokens directly; step_finish events nest it under data.part.tokens.
+	// The flat input_tokens/output_tokens/total_tokens fields remain a fallback.
+	tokensCandidates := []map[string]any{}
+	if tokens, ok := data["tokens"].(map[string]any); ok {
+		tokensCandidates = append(tokensCandidates, tokens)
+	}
+	if part, ok := data["part"].(map[string]any); ok {
+		if partTokens, ok := part["tokens"].(map[string]any); ok {
+			tokensCandidates = append(tokensCandidates, partTokens)
+		}
+	}
+	for _, tokens := range tokensCandidates {
+		if n, ok := int64From(tokens["input"]); ok && usage.InputTokens == nil {
+			usage.InputTokens = &n
+		}
+		if n, ok := int64From(tokens["output"]); ok && usage.OutputTokens == nil {
+			usage.OutputTokens = &n
+		}
+		if n, ok := int64From(tokens["total"]); ok && usage.TotalTokens == nil {
+			usage.TotalTokens = &n
+		}
+		if n, ok := int64From(tokens["reasoning"]); ok && usage.ReasoningTokens == nil {
+			usage.ReasoningTokens = &n
+		}
+		if cache, ok := tokens["cache"].(map[string]any); ok {
+			if n, ok := int64From(cache["read"]); ok && usage.CacheReadTokens == nil {
+				usage.CacheReadTokens = &n
+			}
+			if n, ok := int64From(cache["write"]); ok && usage.CacheWriteTokens == nil {
+				usage.CacheWriteTokens = &n
+			}
+		}
+	}
+	if n, ok := int64From(data["input_tokens"]); ok && usage.InputTokens == nil {
 		usage.InputTokens = &n
 	}
-	if n, ok := int64From(data["output_tokens"]); ok {
+	if n, ok := int64From(data["output_tokens"]); ok && usage.OutputTokens == nil {
 		usage.OutputTokens = &n
 	}
-	if n, ok := int64From(data["total_tokens"]); ok {
+	if n, ok := int64From(data["total_tokens"]); ok && usage.TotalTokens == nil {
 		usage.TotalTokens = &n
 	}
 	return usage
