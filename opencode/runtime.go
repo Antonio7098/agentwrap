@@ -866,26 +866,34 @@ func float64From(v any) (float64, bool) {
 	return 0, false
 }
 func mergeUsage(primary, fallback agentwrap.Usage) agentwrap.Usage {
-	if primary.InputTokens == nil {
+	// Durable DB usage is the aggregate across every assistant turn in the run,
+	// while streamed usage commonly describes only the most recent turn. Prefer
+	// every populated aggregate field so callers do not under-report multi-turn
+	// runs. Keep streaming values only when reconciliation could not recover a
+	// field.
+	if fallback.InputTokens != nil {
 		primary.InputTokens = fallback.InputTokens
 	}
-	if primary.OutputTokens == nil {
+	if fallback.OutputTokens != nil {
 		primary.OutputTokens = fallback.OutputTokens
 	}
-	if primary.TotalTokens == nil {
+	if fallback.TotalTokens != nil {
 		primary.TotalTokens = fallback.TotalTokens
 	}
-	if primary.ReasoningTokens == nil {
+	if fallback.ReasoningTokens != nil {
 		primary.ReasoningTokens = fallback.ReasoningTokens
 	}
-	if primary.CacheReadTokens == nil {
+	if fallback.CacheReadTokens != nil {
 		primary.CacheReadTokens = fallback.CacheReadTokens
 	}
-	if primary.CacheWriteTokens == nil {
+	if fallback.CacheWriteTokens != nil {
 		primary.CacheWriteTokens = fallback.CacheWriteTokens
 	}
-	if primary.Turns == nil {
+	if fallback.Turns != nil {
 		primary.Turns = fallback.Turns
+	}
+	if fallback.Native != nil {
+		primary.Native = fallback.Native
 	}
 	return primary
 }

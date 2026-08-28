@@ -1761,3 +1761,31 @@ func TestReadOpenCodeLogDeltaIsBounded(t *testing.T) {
 		t.Fatalf("read bytes = %d, want %d", len(got), maxOpenCodeLogScanBytes)
 	}
 }
+
+func TestMergeUsagePrefersDurableAggregateOverLastStreamedTurn(t *testing.T) {
+	streamed := agentwrap.Usage{
+		Turns:           int64Ptr(1),
+		InputTokens:     int64Ptr(67),
+		OutputTokens:    int64Ptr(22),
+		TotalTokens:     int64Ptr(6366),
+		CacheReadTokens: int64Ptr(6277),
+	}
+	aggregate := agentwrap.Usage{
+		Turns:           int64Ptr(3),
+		InputTokens:     int64Ptr(4290),
+		OutputTokens:    int64Ptr(198),
+		TotalTokens:     int64Ptr(18774),
+		CacheReadTokens: int64Ptr(14286),
+		Native:          map[string]any{"source": "opencode_db"},
+	}
+
+	got := mergeUsage(streamed, aggregate)
+	if got.Turns == nil || *got.Turns != 3 || got.InputTokens == nil || *got.InputTokens != 4290 ||
+		got.OutputTokens == nil || *got.OutputTokens != 198 || got.TotalTokens == nil || *got.TotalTokens != 18774 ||
+		got.CacheReadTokens == nil || *got.CacheReadTokens != 14286 {
+		t.Fatalf("usage = %#v, want durable multi-turn aggregate", got)
+	}
+	if got.Native["source"] != "opencode_db" {
+		t.Fatalf("native = %#v, want durable source", got.Native)
+	}
+}
