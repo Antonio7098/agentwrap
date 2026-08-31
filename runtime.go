@@ -59,6 +59,7 @@ type RunRequest struct {
 	RequireCaps      []Capability
 	RequireHealth    []HealthCheckID
 	Validation       *ValidationSpec
+	PromptCache      PromptCacheDirective
 }
 
 // PermissionMode is an open placeholder for future permission policies.
@@ -114,6 +115,12 @@ const (
 	CapabilityPermissions      Capability = "permissions"
 	CapabilityUsage            Capability = "usage"
 	CapabilityValidationEvents Capability = "validation_events"
+	// CapabilityPromptCacheAdvisory means the adapter accepts, validates, and
+	// audits cache directives while leaving placement to the downstream runtime.
+	CapabilityPromptCacheAdvisory Capability = "prompt_cache_advisory"
+	// CapabilityPromptCacheNative means the adapter can apply the caller's
+	// routing key and exact byte breakpoint at the provider boundary.
+	CapabilityPromptCacheNative Capability = "prompt_cache_native"
 )
 
 // CapabilitySupport records support status and safe explanation text.

@@ -34,6 +34,21 @@ const MetadataTempRoot = "opencode.temp_root"
 // StartRun launches OpenCode in JSON event mode and returns a streaming run
 // handle. The returned run owns the subprocess and event decoding state.
 func (r *Runtime) StartRun(ctx context.Context, req agentwrap.RunRequest) (agentwrap.Run, error) {
+	if !req.PromptCache.Enabled() {
+		directive, found, err := agentwrap.PromptCacheDirectiveFromMetadata(req.Metadata)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			req.PromptCache = directive
+		}
+	}
+	if err := agentwrap.ValidatePromptCacheDirective(req.Prompt, req.PromptCache); err != nil {
+		return nil, err
+	}
+	if req.PromptCache.RequireNative {
+		return nil, agentwrap.NewError(agentwrap.ErrorConfiguration, "prompt cache directive", "OpenCode does not expose caller-defined cache routing keys or byte breakpoints", nil)
+	}
 	if err := validateSessionRequest(req); err != nil {
 		return nil, err
 	}
@@ -541,6 +556,7 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 		Artifacts:   r.artifacts,
 		Warnings:    r.warnings,
 		Usage:       r.usage,
+		PromptCache: openCodePromptCacheMetadata(r.req),
 		NativeMetadata: map[string]any{
 			"stderr":                 r.stderrBuffer.String(),
 			"exit_code":              proc.ExitCode,
@@ -602,6 +618,25 @@ func (r *run) finalResult(decodeErr error, proc processResult, cleanup agentwrap
 		return result, sdkErr
 	}
 	return result, nil
+}
+
+func openCodePromptCacheMetadata(req agentwrap.RunRequest) agentwrap.PromptCacheMetadata {
+	if !req.PromptCache.Enabled() {
+		return agentwrap.PromptCacheMetadata{}
+	}
+	return agentwrap.PromptCacheMetadata{
+		Requested:               true,
+		KeySHA256:               agentwrap.PromptCacheKeySHA256(req.PromptCache.Key),
+		PrefixSHA256:            strings.ToLower(strings.TrimSpace(req.PromptCache.PrefixSHA256)),
+		BreakpointBytes:         req.PromptCache.BreakpointBytes,
+		Mode:                    req.PromptCache.Mode,
+		Transport:               "opencode-provider-managed-message-cache",
+		ProviderManaged:         true,
+		NativeRoutingKeyApplied: false,
+		NativeBreakpointApplied: false,
+		PromptBytesPreserved:    true,
+		Detail:                  "OpenCode applies provider cache controls at message boundaries; its CLI does not expose the caller routing key or byte breakpoint",
+	}
 }
 
 const maxTerminalOutputBytes = 96 << 10

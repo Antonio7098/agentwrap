@@ -96,6 +96,7 @@ Adapters and wrappers use lifecycle events to expose phase transitions without c
 - Permission metadata.
 - Cleanup metadata.
 - Validation and repair metadata.
+- Prompt-cache request and applied-transport metadata.
 - Artifact references.
 - Warnings and errors.
 - Usage, estimated cost, and throughput.

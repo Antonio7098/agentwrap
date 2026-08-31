@@ -25,6 +25,8 @@ first OpenCode adapter:
   primary run result
 - OpenCode structured-output adapter with timeout/cancellation cleanup and
   best-effort `--session` continuation metadata
+- validated prompt-cache prefix directives with explicit advisory versus
+  provider-native capability reporting
 - OpenCode health probes for executable availability, structured-output help,
   workdir/config/path/provider/model checks where detectable, and required
   preflight blocking before process launch

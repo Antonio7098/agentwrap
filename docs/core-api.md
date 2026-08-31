@@ -47,8 +47,18 @@ Callers should drain `Events()` while waiting if they need streaming progress or
 - `RequireCaps`: required capabilities, for adapters/wrappers that enforce them.
 - `RequireHealth`: required preflight checks before launch.
 - `Validation`: per-run validation override.
+- `PromptCache`: caller-owned stable-prefix identity, exact byte breakpoint,
+  SHA-256 digest, mode, and optional native-transport requirement.
 
 The SDK records safe request facts in metadata but avoids storing large or sensitive prompt content in attempt summaries.
+
+An enabled `PromptCache` directive is checked against the exact prompt bytes
+before launch. Adapters must leave those bytes unchanged and report whether
+they applied the requested routing key and breakpoint. `RequireNative` makes a
+missing native transport a launch error instead of an advisory downgrade.
+The OpenCode adapter also promotes the legacy `prompt_cache_key`,
+`prompt_cache_breakpoint_bytes`, `prompt_cache_prefix_sha256`, and
+`prompt_cache_mode` metadata fields into this typed contract.
 
 ## RunResult
 
@@ -83,6 +93,8 @@ The SDK defines open capability identifiers. Current constants include:
 - `permissions`
 - `usage`
 - `validation_events`
+- `prompt_cache_advisory`
+- `prompt_cache_native`
 
 Use `Capabilities.Supports(capability)` for explicit support checks.
 

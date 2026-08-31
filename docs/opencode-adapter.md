@@ -147,5 +147,15 @@ The adapter reports support for:
 - usage when native events include token data
 - permissions through native config and event projection
 - best-effort session continuation
+- advisory prompt-cache directives with exact-prefix validation
 
-It reports no support for full retained-session lifecycle, fork, replace, release, or native validation events.
+It reports no support for full retained-session lifecycle, fork, replace,
+release, native validation events, or caller-defined native cache routing keys
+and byte breakpoints.
+
+OpenCode applies provider cache controls at message boundaries for supported
+providers. The current CLI does not expose a caller routing key or a breakpoint
+inside the single prompt message. The adapter therefore preserves the prompt,
+records `opencode-provider-managed-message-cache`, and leaves both native
+application flags false in `RunMetadata.PromptCache`. A directive with
+`RequireNative` is rejected before process launch.

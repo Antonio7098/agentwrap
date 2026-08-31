@@ -29,6 +29,7 @@ type RunMetadata struct {
 	Cleanup        CleanupMetadata
 	Validation     ValidationMetadata
 	Repair         RepairMetadata
+	PromptCache    PromptCacheMetadata
 	Artifacts      []ArtifactRef
 	Warnings       []string
 	Errors         []SDKError
@@ -37,6 +38,22 @@ type RunMetadata struct {
 	CostSource     CostSource
 	ThroughputTPS  *float64
 	NativeMetadata map[string]any
+}
+
+// PromptCacheMetadata records the cache semantics requested by the caller and
+// the narrower semantics actually carried by the runtime adapter.
+type PromptCacheMetadata struct {
+	Requested               bool
+	KeySHA256               string
+	PrefixSHA256            string
+	BreakpointBytes         int
+	Mode                    string
+	Transport               string
+	ProviderManaged         bool
+	NativeRoutingKeyApplied bool
+	NativeBreakpointApplied bool
+	PromptBytesPreserved    bool
+	Detail                  string
 }
 
 // AttemptSummary records one runtime attempt made during policy execution.
@@ -75,6 +92,7 @@ type AttemptRequest struct {
 	RequireCaps   []Capability
 	RequireHealth []HealthCheckID
 	MetadataKeys  []string
+	PromptCache   bool
 }
 
 // PolicyMetadata records resilience policy decisions for audit and dashboards.

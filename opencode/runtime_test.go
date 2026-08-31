@@ -3,8 +3,10 @@ package opencode
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -153,6 +155,81 @@ func TestStartRunPassesLargeOptionLikePromptThroughStdin(t *testing.T) {
 		if strings.Contains(arg, "-structure.md") {
 			t.Fatalf("prompt leaked into argv: %q", arg)
 		}
+	}
+}
+
+func TestStartRunCarriesAdvisoryPromptCacheWithoutChangingPrompt(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	rt := NewRuntime(withProcessRunner(runner))
+	prompt := "stable prefix\nvolatile suffix"
+	prefix := "stable prefix\n"
+	digest := sha256.Sum256([]byte(prefix))
+	run, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: prompt,
+		PromptCache: agentwrap.PromptCacheDirective{
+			Key:             "qa-investigator/cohort-a",
+			BreakpointBytes: len(prefix),
+			PrefixSHA256:    fmt.Sprintf("%x", digest[:]),
+			Mode:            "stable-prefix",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if runner.spec.Stdin != prompt {
+		t.Fatalf("stdin = %q, want byte-identical prompt", runner.spec.Stdin)
+	}
+	cache := result.Metadata.PromptCache
+	if !cache.Requested || !cache.ProviderManaged || !cache.PromptBytesPreserved {
+		t.Fatalf("cache metadata = %#v", cache)
+	}
+	if cache.NativeRoutingKeyApplied || cache.NativeBreakpointApplied {
+		t.Fatalf("native OpenCode cache support overstated: %#v", cache)
+	}
+	if cache.Transport != "opencode-provider-managed-message-cache" || cache.PrefixSHA256 != fmt.Sprintf("%x", digest[:]) {
+		t.Fatalf("cache metadata = %#v", cache)
+	}
+}
+
+func TestStartRunRejectsRequiredNativePromptCache(t *testing.T) {
+	prompt := "stable prefix"
+	digest := sha256.Sum256([]byte(prompt))
+	rt := NewRuntime(withProcessRunner(&fakeRunner{}))
+	_, err := rt.StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: prompt,
+		PromptCache: agentwrap.PromptCacheDirective{
+			Key:             "required",
+			BreakpointBytes: len(prompt),
+			PrefixSHA256:    fmt.Sprintf("%x", digest[:]),
+			Mode:            "stable-prefix",
+			RequireNative:   true,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not expose") {
+		t.Fatalf("error = %v, want unsupported native cache error", err)
+	}
+}
+
+func TestStartRunPromotesLegacyPromptCacheMetadata(t *testing.T) {
+	runner := &fakeRunner{proc: &fakeProcess{stdout: readFixture(t, "normal.ndjson")}}
+	prompt := "stable prefix"
+	digest := sha256.Sum256([]byte(prompt))
+	run, err := NewRuntime(withProcessRunner(runner)).StartRun(context.Background(), agentwrap.RunRequest{
+		Prompt: prompt,
+		Metadata: map[string]string{
+			agentwrap.MetadataPromptCacheKey:             "legacy-cohort",
+			agentwrap.MetadataPromptCacheBreakpointBytes: fmt.Sprint(len(prompt)),
+			agentwrap.MetadataPromptCachePrefixSHA256:    fmt.Sprintf("%x", digest[:]),
+			agentwrap.MetadataPromptCacheMode:            "stable-prefix",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result := drainRun(t, run)
+	if !result.Metadata.PromptCache.Requested || result.Metadata.PromptCache.BreakpointBytes != len(prompt) {
+		t.Fatalf("cache metadata = %#v", result.Metadata.PromptCache)
 	}
 }
 
@@ -1145,6 +1222,9 @@ func TestCapabilities(t *testing.T) {
 	}
 	if !caps.Supports(agentwrap.CapabilityStructuredEvents) || !caps.Supports(agentwrap.CapabilityRawPayloads) {
 		t.Fatalf("caps = %#v", caps)
+	}
+	if !caps.Supports(agentwrap.CapabilityPromptCacheAdvisory) || caps.Supports(agentwrap.CapabilityPromptCacheNative) {
+		t.Fatalf("prompt cache capabilities = %#v", caps.Features)
 	}
 	if caps.Supports(agentwrap.CapabilitySessions) {
 		t.Fatalf("sessions should not be fully supported in Sprint 3")

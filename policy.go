@@ -828,6 +828,9 @@ func overlayRunRequest(dst *RunRequest, src RunRequest) {
 	if src.RequireHealth != nil {
 		dst.RequireHealth = append([]HealthCheckID(nil), src.RequireHealth...)
 	}
+	if src.PromptCache.Enabled() {
+		dst.PromptCache = src.PromptCache
+	}
 }
 
 func attemptRequest(req RunRequest) AttemptRequest {
@@ -844,6 +847,7 @@ func attemptRequest(req RunRequest) AttemptRequest {
 		RequireCaps:   append([]Capability(nil), req.RequireCaps...),
 		RequireHealth: append([]HealthCheckID(nil), req.RequireHealth...),
 		MetadataKeys:  sortedKeys(req.Metadata),
+		PromptCache:   req.PromptCache.Enabled(),
 	}
 }
 
